@@ -8,10 +8,10 @@
 #include <alsa/asoundlib.h>
 
 #define SAMPLERATE	48000
-#define PERIOD_TIME	10					// PCM interrupt period [ms]
-#define BUFFER_TIME	(2*PERIOD_TIME)		// Buffer time [ms], should be at least 2xPERIOD_TIME
-
-#define BUFFER_SIZE	(SAMPLERATE * BUFFER_TIME / 1000) 	// sample rate [1/sec] x time [sec]
+#define PERIOD_TIME	10                                  // PCM interrupt period [ms]
+#define BUFFER_TIME	(2*PERIOD_TIME)                     // Buffer time [ms], should be at least 2xPERIOD_TIME
+#define BUFFER_SIZE	(SAMPLERATE * BUFFER_TIME / 1000)   // sample rate [1/sec] x time [sec]
+#define	LATENCY		(1000 * BUFFER_SIZE / SAMPLERATE)   // same as BUFFER_TIME [ms]
 
 static void ProcessStereo(int* samples, int N)
 {
@@ -73,14 +73,14 @@ static int open_stream(snd_pcm_t **handle, const char *name, int dir)
 
 	//
 	if ((err = snd_pcm_hw_params_set_buffer_time_near(*handle, hw_params, &buffer_time, NULL)) < 0) {
-		fprintf(stderr, "%s (%s): cannot set sample rate(%s)\n",
+		fprintf(stderr, "%s (%s): cannot set buffer time (%s)\n",
 			name, dirname, snd_strerror(err));
 		return err;
 	}
 	printf("Actual buffer time %d\n", buffer_time/1000);
 
 	if ((err = snd_pcm_hw_params_set_period_time_near(*handle, hw_params, &period_time, NULL)) < 0) {
-		fprintf(stderr, "%s (%s): cannot set sample rate(%s)\n",
+		fprintf(stderr, "%s (%s): cannot set period time (%s)\n",
 			name, dirname, snd_strerror(err));
 		return err;
 	}
@@ -134,6 +134,8 @@ static int open_stream(snd_pcm_t **handle, const char *name, int dir)
 		return err;
 	}
 
+	snd_pcm_sw_params_free(sw_params);
+
 	return 0;
 }
 
@@ -166,7 +168,7 @@ int main(int argc, char *argv[])
 			 snd_strerror(err));
 		return err;
 	}
-	printf("Audio started\n");
+	printf("Audio started with %d [ms] latency\n", LATENCY);
 
 	memset(buf, 0, sizeof(buf));
 
