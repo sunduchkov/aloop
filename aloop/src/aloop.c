@@ -6,15 +6,17 @@
  *	https://github.com/jackaudio/jack1/blob/master/drivers/alsa/alsa_driver.c
  */
 
+#include <math.h>
 #include <stdio.h>
 #include <inttypes.h>
 #include <alsa/asoundlib.h>
 
 #define SAMPLERATE	48000
-#define PERIOD_TIME	50                                  // PCM interrupt period [ms]
+#define PERIOD_TIME	40                                  // PCM interrupt period [ms]
 #define BUFFER_TIME	(2*PERIOD_TIME)                     // Buffer time [ms], should be at least 2xPERIOD_TIME
 #define BUFFER_SIZE	(SAMPLERATE * BUFFER_TIME / 1000)   // sample rate [1/sec] x time [sec]
 #define	LATENCY		(1000 * BUFFER_SIZE / SAMPLERATE)   // same as BUFFER_TIME [ms]
+#define PERIOD_SIZE (SAMPLERATE/1000*PERIOD_TIME)
 
 typedef struct _alsa_driver
 {
@@ -31,12 +33,22 @@ typedef struct _alsa_driver
     //snd_pcm_sw_params_t          *capture_sw_params;
 
     int                           capture_and_playback_not_synced;
-	uint64_t                      poll_timeout;
+	uint64_t                      poll_timeout, period_usecs;
 
     char                         *alsa_name_playback;
     char                         *alsa_name_capture;
 
 } alsa_driver_t;
+
+uint64_t
+get_microseconds_from_system (void) {
+	uint64_t t;
+	struct timespec time;
+
+	clock_gettime(CLOCK_MONOTONIC, &time);
+	t = (uint64_t) time.tv_sec * 1000000 + (uint64_t) time.tv_nsec / 1000;
+	return t;
+}
 
 static void ProcessStereo(int* samples, int N)
 {
@@ -179,9 +191,11 @@ alsa_driver_t* alsa_driver_new()
 		return NULL;
 	printf("Playback opened\n");
 
+#if 1
 	if ((err = open_stream(&driver->capture_handle, "hw:0,0", SND_PCM_STREAM_CAPTURE)) < 0)
 		return NULL;
 	printf("Capture opened\n");
+#endif
 
 	driver->capture_and_playback_not_synced = 0;
 
@@ -192,6 +206,11 @@ alsa_driver_t* alsa_driver_new()
 		}
 	}
 
+	driver->period_usecs = (uint64_t) floor ((((float) PERIOD_SIZE) / SAMPLERATE) * 1000000.0f);
+	driver->poll_timeout = (int) floor (1.5f * driver->period_usecs /1000.0);
+
+	printf("driver->poll_timeout %Lu\n", driver->poll_timeout);
+
 	if(0 == driver->capture_and_playback_not_synced)
 	{
 		printf("Playback and Capture are synced\n");
@@ -200,7 +219,7 @@ alsa_driver_t* alsa_driver_new()
 	return driver;
 }
 
-int alsa_driver_start(alsa_driver_t* driver)
+int alsa_driver_prepare(alsa_driver_t* driver)
 {
 	int err;
 
@@ -269,6 +288,9 @@ int alsa_driver_wait(alsa_driver_t* driver)
 	int i;
 
 	int nfds = 0;
+	int ci;
+	uint64_t poll_start, poll_end;
+
 
 	if (driver->playback_handle) {
 		snd_pcm_poll_descriptors (driver->playback_handle,
@@ -281,7 +303,7 @@ int alsa_driver_wait(alsa_driver_t* driver)
 		snd_pcm_poll_descriptors (driver->capture_handle,
 					  &driver->pfd[nfds],
 					  driver->capture_nfds);
-		//ci = nfds;
+		ci = nfds;
 		nfds += driver->capture_nfds;
 	}
 
@@ -291,28 +313,7 @@ int alsa_driver_wait(alsa_driver_t* driver)
 		driver->pfd[i].events |= POLLERR;
 	}
 
-#if 0
-	if (extra_fd >= 0) {
-		driver->pfd[nfds].fd = extra_fd;
-		driver->pfd[nfds].events =
-			POLLIN|POLLERR|POLLHUP|POLLNVAL;
-		nfds++;
-	}
-#endif
-
-//		poll_enter = driver->get_microseconds ();
-
-#if 0
-	if (poll_enter > driver->poll_next) {
-		/*
-		 * This processing cycle was delayed past the
-		 * next due interrupt!  Do not account this as
-		 * a wakeup delay:
-		 */
-		driver->poll_next = 0;
-		driver->poll_late++;
-	}
-#endif
+	poll_start = jack_get_microseconds_from_system();
 
 	int poll_result = poll (driver->pfd, nfds, driver->poll_timeout);
 	if (poll_result < 0) {
@@ -326,17 +327,113 @@ int alsa_driver_wait(alsa_driver_t* driver)
 		return 0;
 	}
 
-//		poll_ret = driver->get_microseconds ();
+	poll_end = jack_get_microseconds_from_system();
+	poll_end -= poll_start;
+	printf("poll %Lu\n",poll_end );
+
+	unsigned short revents;
+
+	if (driver->playback_handle)
+	{
+		if (snd_pcm_poll_descriptors_revents
+		    (driver->playback_handle, &driver->pfd[0],
+		     driver->playback_nfds, &revents) < 0)
+		{
+			printf ("ALSA: playback revents failed\n");
+			return 0;
+		}
+
+		if (revents & POLLERR)
+		{
+			printf ("playback xrun\n");
+		}
+	}
+
+	if (driver->capture_handle)
+	{
+		if (snd_pcm_poll_descriptors_revents
+		    (driver->capture_handle, &driver->pfd[ci],
+		     driver->capture_nfds, &revents) < 0) {
+			printf ("ALSA: capture revents failed\n");
+			return 0;
+		}
+
+		if (revents & POLLERR)
+		{
+			printf ("capture xrun\n");
+		}
+	}
+
 	return 1;
+}
+
+int alsa_driver_write(alsa_driver_t* driver, int* buf)
+{
+	int ret;
+	int avail, err;
+
+	ret = 0;
+
+	if(driver->playback_handle)
+	{
+		avail = snd_pcm_avail_update(driver->playback_handle);
+		if (avail > 1024)
+		{
+			if (avail > BUFFER_SIZE)
+				avail = BUFFER_SIZE;
+
+			if ((err = snd_pcm_writei(driver->playback_handle, buf, avail)) < 0) {
+				printf ("write failed %s\n", snd_strerror (err));
+				exit (1);
+			}
+
+			ret = avail;
+
+		} else {
+				//printf ("nothing to write\n");
+		}
+	}
+
+	return ret;
+}
+
+int alsa_driver_read(alsa_driver_t* driver, int* samples)
+{
+	int avail, err, ret;
+
+	ret = 0;
+
+	if (driver->capture_handle)
+	{
+		avail = snd_pcm_avail_update(driver->capture_handle);
+		if (avail >= 1024)
+		{
+			if (avail > BUFFER_SIZE)
+				avail = BUFFER_SIZE;
+
+			if ((err = snd_pcm_readi(driver->capture_handle, samples, avail)) < 0) {
+					printf ("read failed %s\n", snd_strerror (err));
+					exit (1);
+			}
+
+			ret = avail;
+
+		} else {
+				//printf ("nothing to read\n");
+		}
+	}
+
+	return ret;
 }
 
 int main(int argc, char *argv[])
 {
 	alsa_driver_t* driver;
 
-	//snd_pcm_t *playback_handle, *capture_handle;
 	int buf[BUFFER_SIZE*2]; // 2 - for stereo
-	int i,j;
+	int r, w;
+	int avail;
+
 	memset(buf,0,sizeof(buf));
 
 	printf("ALSA Path-through starting\n");
@@ -347,69 +444,56 @@ int main(int argc, char *argv[])
 		return 0;
 	}
 
-	printf("Audio Interface prepared with %d [ms] latency\n", LATENCY);
+	printf("Audio Interface initialized with %d [ms] latency\n", LATENCY);
 
-	if(!alsa_driver_start(driver))
+	if(!alsa_driver_prepare(driver))
 	{
 		printf("alsa_driver_start not succeeded\n");
 		return 0;
 	}
 
-	printf("Audio started\n");
+	printf("Audio Interface prepared for start\n");
 
-	i = 0;
-	j = 0;
+
+	r = 0;
+	w = 0;
+
+	w = alsa_driver_write(driver, buf);
+
+	printf("Audio started\n");
 
 	while (1)
 	{
-		int avail;
+		avail = alsa_driver_write(driver, buf);
 
-		alsa_driver_wait(driver);
-
-		if(driver->capture_handle)
+		w += avail;
+		if(w >= SAMPLERATE)
 		{
-			avail = snd_pcm_avail_update(driver->capture_handle);
-			if (avail >= 1024)
-			{
-				if (avail > BUFFER_SIZE)
-					avail = BUFFER_SIZE;
-
-				snd_pcm_readi(driver->capture_handle, buf, avail);
-
-				ProcessStereo(buf,avail);
-
-				//printf("r %d, ",avail);
-				i += avail;
-				if(i >= SAMPLERATE)
-				{
-					printf(".");
-					fflush(stdout);
-					i = 0;
-				}
-			}
+			printf("+");
+			fflush(stdout);
+			w = 0;
 		}
 
-		if(driver->playback_handle)
+		avail = alsa_driver_read(driver, buf);
+		r += avail;
+		if(r >= SAMPLERATE)
 		{
-			avail = snd_pcm_avail_update(driver->playback_handle);
-			if (avail > 1024)
-			{
-				if (avail > BUFFER_SIZE)
-					avail = BUFFER_SIZE;
-
-
-				snd_pcm_writei(driver->playback_handle, buf, avail);
-
-				//printf("w %d, ",avail);
-				j += avail;
-				if(j >= SAMPLERATE)
-				{
-					printf("+");
-					fflush(stdout);
-					j = 0;
-				}
-			}
+			printf(".");
+			fflush(stdout);
+			r = 0;
 		}
+
+		if(avail)
+		{
+			ProcessStereo(buf,avail);
+		}
+
+#if 0
+		if (snd_pcm_wait (driver->playback_handle, driver->poll_timeout) == 0) {
+				printf ("PCM wait failed, driver timeout\n");
+		}
+#endif
+		//alsa_driver_wait(driver);
 
 	}
 
