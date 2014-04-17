@@ -5,46 +5,52 @@
  *
  *	https://github.com/jackaudio/jack1/blob/master/drivers/alsa/alsa_driver.c
  *
- *	Beagleboard_xM, Ubuntu 13.10
- *
- *		PERIOD_TIME 		40
- *		CAPTURE_ENABLED 	1
- *		POLLING_ENABLED 	0
- *		USING_SYSTEM_POLL 	1
- *
- *	BeagleBone Black, Ubuntu 13.10
- *
- *		PERIOD_TIME 		20
- *		CAPTURE_ENABLED 	0
- *		POLLING_ENABLED 	1
- *		USING_SYSTEM_POLL 	1
  */
 
 #include <math.h>
 #include <stdio.h>
+#include <sched.h>
 #include <inttypes.h>
 #include <alsa/asoundlib.h>
 #include <alsa/pcm.h>
 
+//
+// ALSA terminology
+//
+// One frame might contain one sample (when only one converter is used - mono)
+// or more samples (for example: stereo has signals from two converters recorded at same time).
+// Digital audio stream contains collection of frames recorded at boundaries of continuous time periods.
+//
+// ALSA uses the ring buffer to store outgoing (playback) and incoming (capture, record) samples.
+// There are two pointers being maintained to allow a precise communication between application and
+// device pointing to current processed sample by hardware and last processed sample by application.
+// The modern audio chips allow to program the transfer time periods. It means that the stream of samples
+// is divided to small chunks. Device acknowledges to application when the transfer of a chunk is complete.
+//
+
 // parameters
 
 #define SAMPLERATE				48000
-#define PERIOD_TIME				40		// PCM interrupt period [ms]
+#define NCHANNELS				2				// stereo signal, two samples in one frame
+#define PERIOD_SIZE				1440//512//360		// frames number between PCM interrupts
+#define BUFFER_SIZE				(2*PERIOD_SIZE)	// ring buffer in frames. should be at least 2 periods
 
-#define MMAP_ACCESS_ENABLED		0
 #define CAPTURE_ENABLED			1
+#define MMAP_ACCESS_ENABLED		0
 #define POLLING_ENABLED			0
 #define	USING_SYSTEM_POLL		1
 
 // calculated constants
 
-#define BUFFER_TIME				(2*PERIOD_TIME)                     // Buffer time [ms], should be at least 2xPERIOD_TIME
-#define BUFFER_SIZE_IN_PERIODS	(SAMPLERATE * BUFFER_TIME / 1000)   // sample rate [1/sec] x time [sec]
-#define	LATENCY					(1000 * BUFFER_SIZE_IN_PERIODS / SAMPLERATE)   // same as BUFFER_TIME [ms]
-#define PERIOD_SIZE 			(SAMPLERATE/1000*PERIOD_TIME)
+#define PERIOD_TIME				(PERIOD_SIZE * 1000 / SAMPLERATE) // [ms] between PCM interrupts
+#define BUFFER_TIME				(BUFFER_SIZE * 1000 / SAMPLERATE)
+#define LATENCY					BUFFER_TIME
+
+#define AVAIL_READ_MIN			(PERIOD_SIZE/2)//1024
+#define AVAIL_WRITE_MIN			(PERIOD_SIZE/2)//1024
 
 #if MMAP_ACCESS_ENABLED
-typedef void (*process_t)(int* pSamplesIn[2], int nOffset, int* pSamplesOut[2], int nLength);
+typedef void (*process_t)(int* pSamplesIn[NCHANNELS], int* pSamplesOut[NCHANNELS], int nLength);
 #else
 typedef void (*process_t)(int* pSamplesIn, int* pSamplesOut, int nLength);
 #endif
@@ -60,10 +66,12 @@ typedef struct _alsa_driver
     char                         *alsa_name_capture;
 
 #if MMAP_ACCESS_ENABLED
-    unsigned long                 capture_interleave_skip[2];
-    unsigned long                 playback_interleave_skip[2];
+    int 						 *capture_addr[NCHANNELS];
+    int 						 *playback_addr[NCHANNELS];
+    unsigned long                 capture_interleave_skip[NCHANNELS];
+    unsigned long                 playback_interleave_skip[NCHANNELS];
 #else
-    int 						  samples[BUFFER_SIZE_IN_PERIODS*2]; // 2 for stereo
+    int 						  samples[BUFFER_SIZE*NCHANNELS];
 #endif
 
 #if USING_SYSTEM_POLL
@@ -77,19 +85,6 @@ typedef struct _alsa_driver
 
 }	alsa_driver_t;
 
-typedef struct
-{
-#if MMAP_ACCESS_ENABLED
-	int*	samples[2];
-#else
-	int*	samples;
-#endif
-	int		size_in_periods;
-	int		r_in_periods;
-	int		w_in_periods;
-
-}	buffer_t;
-
 uint64_t
 get_microseconds_from_system (void) {
 	uint64_t t;
@@ -101,7 +96,7 @@ get_microseconds_from_system (void) {
 }
 
 #if MMAP_ACCESS_ENABLED
-static void ProcessStereo(int* samplesIn[2], int offset, int* samplesOut[2], int N)
+static void ProcessStereo(int* samplesIn[NCHANNELS], int* samplesOut[NCHANNELS], int N)
 {
 	int i;
 	int L, R;
@@ -110,8 +105,8 @@ static void ProcessStereo(int* samplesIn[2], int offset, int* samplesOut[2], int
 	for(i = 0; i < N; ++i)
 	{
 #if CAPTURE_ENABLED
-		L = samplesIn[0][offset + i];
-		R = samplesIn[1][offset + i];
+		L = samplesIn[0][i];
+		R = samplesIn[1][i];
 #else
 		// Square signal to Left channel
 		if(i & 0x40) L = (1<<30); else L = -(1<<30);
@@ -134,8 +129,8 @@ static void ProcessStereo(int* samplesIn, int* samplesOut, int N)
 	for(i = 0; i < N; ++i)
 	{
 #if CAPTURE_ENABLED
-		L = samplesIn[i*2];
-		R = samplesIn[i*2+1];
+		L = samplesIn[i*NCHANNELS];
+		R = samplesIn[i*NCHANNELS+1];
 #else
 		// Square signal to Left channel
 		if(i & 0x40) L = (1<<30); else L = -(1<<30);
@@ -145,8 +140,8 @@ static void ProcessStereo(int* samplesIn, int* samplesOut, int N)
 		// Spectrum inversion for Right channel
 		//if(i & 1) R = -R;
 
-		samplesOut[i*2] = L;
-		samplesOut[i*2+1] = R;
+		samplesOut[i*NCHANNELS] = L;
+		samplesOut[i*NCHANNELS+1] = R;
 	}
 }
 #endif
@@ -156,16 +151,14 @@ static int open_stream(snd_pcm_t **handle, const char *name, int dir)
 	snd_pcm_hw_params_t *hw_params;
 	snd_pcm_sw_params_t *sw_params;
 	const char *dirname = (dir == SND_PCM_STREAM_PLAYBACK) ? "PLAYBACK" : "CAPTURE";
-	int err;
 	unsigned int rate = SAMPLERATE;
 	unsigned int format = SND_PCM_FORMAT_S32_LE;
-	unsigned int buffer_time = BUFFER_TIME*1000; // time in usec
-	unsigned int period_time = PERIOD_TIME*1000; // time in usec
+	snd_pcm_uframes_t buffer_size = BUFFER_SIZE;
+	snd_pcm_uframes_t period_size = PERIOD_SIZE;
+	int err;
 
-	//snd_pcm_uframes_t period_size, buffer_size;
-
-	if ((err = snd_pcm_open(handle, name, dir, 0)) < 0) {
-		fprintf(stderr, "%s (%s): cannot open audio device (%s)\n",
+	if ((err = snd_pcm_open(handle, name, dir, SND_PCM_NONBLOCK)) < 0) {
+		fprintf(stderr, "%s (%s): cannot open audio device (%s) in SND_PCM_NONBLOCK mode\n",
 			name, dirname, snd_strerror(err));
 		return err;
 	}
@@ -202,19 +195,19 @@ static int open_stream(snd_pcm_t **handle, const char *name, int dir)
 		return err;
 	}
 
-	if ((err = snd_pcm_hw_params_set_buffer_time_near(*handle, hw_params, &buffer_time, NULL)) < 0) {
+	if ((err = snd_pcm_hw_params_set_buffer_size_near(*handle, hw_params, &buffer_size)) < 0) {
 		fprintf(stderr, "%s (%s): cannot set buffer time (%s)\n",
 			name, dirname, snd_strerror(err));
 		return err;
 	}
-	printf("Actual buffer time %d\n", buffer_time/1000);
+	printf("Actual buffer size %d = %d [ms]\n", (int)buffer_size, (int)buffer_size*1000/SAMPLERATE);
 
-	if ((err = snd_pcm_hw_params_set_period_time_near(*handle, hw_params, &period_time, NULL)) < 0) {
+	if ((err = snd_pcm_hw_params_set_period_size_near(*handle, hw_params, &period_size, 0)) < 0) {
 		fprintf(stderr, "%s (%s): cannot set period time (%s)\n",
 			name, dirname, snd_strerror(err));
 		return err;
 	}
-	printf("Actual period time %d\n", period_time/1000);
+	printf("Actual period size %d = %d [ms]\n", (int)period_size, (int)period_size*1000/SAMPLERATE);
 
 	if ((err = snd_pcm_hw_params_set_rate_near(*handle, hw_params, &rate, NULL)) < 0) {
 		fprintf(stderr, "%s (%s): cannot set sample rate(%s)\n",
@@ -223,7 +216,7 @@ static int open_stream(snd_pcm_t **handle, const char *name, int dir)
 	}
 	printf("Actual sample rate %d\n", rate);
 
-	if ((err = snd_pcm_hw_params_set_channels(*handle, hw_params, 2)) < 0) {
+	if ((err = snd_pcm_hw_params_set_channels(*handle, hw_params, NCHANNELS)) < 0) {
 		fprintf(stderr, "%s (%s): cannot set channel count(%s)\n",
 			name, dirname, snd_strerror(err));
 		return err;
@@ -247,7 +240,7 @@ static int open_stream(snd_pcm_t **handle, const char *name, int dir)
 			name, dirname, snd_strerror(err));
 		return err;
 	}
-	if ((err = snd_pcm_sw_params_set_avail_min(*handle, sw_params, BUFFER_SIZE_IN_PERIODS)) < 0) {
+	if ((err = snd_pcm_sw_params_set_avail_min(*handle, sw_params, BUFFER_SIZE/2)) < 0) {
 		fprintf(stderr, "%s (%s): cannot set minimum available count(%s)\n",
 			name, dirname, snd_strerror(err));
 		return err;
@@ -373,7 +366,7 @@ alsa_driver_t* alsa_driver_new()
 static int get_channel_address(
 		snd_pcm_t* handle,
 		snd_pcm_uframes_t* offset, snd_pcm_uframes_t* avail,
-		char* addr[2], unsigned long interleave_skip[2])
+		char* addr[NCHANNELS], unsigned long interleave_skip[NCHANNELS])
 {
 	const snd_pcm_channel_area_t* areas;
 	int err;
@@ -383,7 +376,7 @@ static int get_channel_address(
 		return err;
 	}
 
-	for (chn = 0; chn < 2; chn++) {
+	for (chn = 0; chn < NCHANNELS; chn++) {
 		const snd_pcm_channel_area_t *a = &areas[chn];
 		addr[chn] = (char *) a->addr + ((a->first + a->step * *(offset)) / 8);
 		interleave_skip[chn] = (unsigned long) (a->step / 8);
@@ -399,7 +392,7 @@ int alsa_driver_prepare(alsa_driver_t* driver)
 	int err;
 
 #if MMAP_ACCESS_ENABLED
-    char* playback_addr[2];
+    char* playback_addr[NCHANNELS];
 	snd_pcm_uframes_t avail;
 	snd_pcm_uframes_t offset;
 #endif
@@ -450,7 +443,7 @@ int alsa_driver_prepare(alsa_driver_t* driver)
 #if MMAP_ACCESS_ENABLED
 	avail = snd_pcm_avail_update (driver->playback_handle);
 
-	if (avail != BUFFER_SIZE_IN_PERIODS) {
+	if (avail != BUFFER_SIZE) {
 		printf ("ALSA: full buffer not available at start, %u\n", (unsigned int)avail);
 		return -1;
 	}
@@ -472,6 +465,51 @@ int alsa_driver_prepare(alsa_driver_t* driver)
 		fprintf(stderr, "cannot start audio interface for playback (%s)\n",
 			 snd_strerror(err));
 		return 0;
+	}
+#endif
+	return 1;
+}
+
+int alsa_driver_start(alsa_driver_t* driver)
+{
+#if MMAP_ACCESS_ENABLED
+    char* playback_addr[NCHANNELS];
+	snd_pcm_uframes_t offset;
+#endif
+	snd_pcm_uframes_t avail;
+	int err;
+
+	avail = snd_pcm_avail_update (driver->playback_handle);
+
+	if (avail != BUFFER_SIZE) {
+		printf ("ALSA: full buffer not available at start, %u\n", (unsigned int)avail);
+		return -1;
+	}
+#if MMAP_ACCESS_ENABLED
+	if ((err = get_channel_address(
+			driver->playback_handle,
+			&offset, &avail, playback_addr, driver->playback_interleave_skip) < 0)) {
+		printf ("ALSA: %s: mmap areas info error ", driver->alsa_name_playback);
+		return -1;
+	}
+
+	if ((err = snd_pcm_mmap_commit (driver->playback_handle, offset, avail)) < 0) {
+		printf ("ALSA: could not complete playback of %u frames: error = %d", (unsigned int)avail, err);
+		if (err != -EPIPE && err != -ESTRPIPE)
+			return -1;
+	}
+
+	if ((err = snd_pcm_start (driver->playback_handle)) < 0) {
+		fprintf(stderr, "cannot start audio interface for playback (%s)\n",
+			 snd_strerror(err));
+		return 0;
+	}
+#else
+	memset (driver->samples, 0, BUFFER_SIZE*NCHANNELS*sizeof(int));
+
+	if ((err = snd_pcm_writei(driver->playback_handle, driver->samples, avail)) < 0) {
+		printf ("write failed %s\n", snd_strerror (err));
+		exit (1);
 	}
 #endif
 	return 1;
@@ -566,36 +604,34 @@ int alsa_driver_wait(alsa_driver_t* driver)
 	return ret;
 }
 
-int alsa_driver_write(alsa_driver_t* driver, process_t process, buffer_t* buf)
+int alsa_driver_write(alsa_driver_t* driver, process_t process)
 {
-	int ret;
-	int err;
-
-	snd_pcm_uframes_t avail;
 #if MMAP_ACCESS_ENABLED
-    char* playback_addr[2];
 	snd_pcm_uframes_t offset;
 #endif
+	snd_pcm_uframes_t avail;
+	int ret;
+	int err;
 
 	ret = 0;
 
 	if(driver->playback_handle)
 	{
 		avail = snd_pcm_avail_update(driver->playback_handle);
-		if (avail >= 1024)
+		if (avail >= AVAIL_WRITE_MIN)
 		{
-			if (avail > BUFFER_SIZE_IN_PERIODS)
-				avail = BUFFER_SIZE_IN_PERIODS;
+			if (avail > BUFFER_SIZE)
+				avail = BUFFER_SIZE;
 
 #if MMAP_ACCESS_ENABLED
 			if ((err = get_channel_address(
 					driver->playback_handle,
-					&offset, &avail, playback_addr, driver->playback_interleave_skip) < 0)) {
+					&offset, &avail, (char**)driver->playback_addr, driver->playback_interleave_skip) < 0)) {
 				printf ("ALSA: %s: mmap areas info error ", driver->alsa_name_playback);
 				return -1;
 			}
 
-			process(buf->samples, buf->r_in_periods, (int**)playback_addr, avail);
+			process(driver->capture_addr, driver->playback_addr, avail);
 
 			if ((err = snd_pcm_mmap_commit (driver->playback_handle, offset, avail)) < 0) {
 				printf ("ALSA: could not complete playback of %u frames: error = %d", (unsigned int)avail, err);
@@ -603,17 +639,13 @@ int alsa_driver_write(alsa_driver_t* driver, process_t process, buffer_t* buf)
 					return -1;
 			}
 #else
-			process(&buf->samples[buf->r_in_periods*2], driver->samples, avail);
+			process(driver->samples, driver->samples, avail);
 
 			if ((err = snd_pcm_writei(driver->playback_handle, driver->samples, avail)) < 0) {
 				printf ("write failed %s\n", snd_strerror (err));
-				exit (1);
+				exit(1);
 			}
-
 #endif
-			if((buf->r_in_periods += avail) >= buf->size_in_periods) {
-				buf->r_in_periods -= buf->size_in_periods;
-			}
 
 			ret = avail;
 
@@ -625,56 +657,43 @@ int alsa_driver_write(alsa_driver_t* driver, process_t process, buffer_t* buf)
 	return ret;
 }
 
-int alsa_driver_read(alsa_driver_t* driver, buffer_t* buf)
+int alsa_driver_read(alsa_driver_t* driver)
 {
 #if MMAP_ACCESS_ENABLED
-    char* capture_addr[2];
 	snd_pcm_uframes_t offset;
 	int err;
 #else
 	int actual;
 #endif
-	int ret;
-
 	snd_pcm_uframes_t avail;
+	int ret;
 
 	ret = 0;
 
 	if (driver->capture_handle)
 	{
 		avail = snd_pcm_avail_update(driver->capture_handle);
-		if (avail >= 1024)
+		if (avail >= AVAIL_READ_MIN)
 		{
-			if (avail > BUFFER_SIZE_IN_PERIODS)
-				avail = BUFFER_SIZE_IN_PERIODS;
+			if (avail > BUFFER_SIZE)
+				avail = BUFFER_SIZE;
 
 #if MMAP_ACCESS_ENABLED
 			if ((err = get_channel_address(
 					driver->capture_handle,
-					&offset, &avail, capture_addr, driver->capture_interleave_skip) < 0)) {
+					&offset, &avail, (char**)driver->capture_addr, driver->capture_interleave_skip) < 0)) {
 				printf ("ALSA: %s: mmap areas info error ", driver->alsa_name_capture);
 				return -1;
 			}
-
-			memcpy(&buf->samples[0][buf->w_in_periods], capture_addr[0], avail*sizeof(int));
-			memcpy(&buf->samples[1][buf->w_in_periods], capture_addr[1], avail*sizeof(int));
 
 			if ((err = snd_pcm_mmap_commit (driver->capture_handle, offset, avail)) < 0) {
 				printf ("ALSA: could not complete read of %u frames: error = %d", (unsigned int)avail, err);
 				return -1;
 			}
-
-			if((buf->w_in_periods += avail) >= buf->size_in_periods) {
-				buf->w_in_periods -= buf->size_in_periods;
-			}
 #else
-			if ((actual = snd_pcm_readi(driver->capture_handle, &buf->samples[buf->w_in_periods*2], avail)) < 0) {
-					printf ("read failed %s\n", snd_strerror (actual));
-					exit (1);
-			}
-
-			if((buf->w_in_periods += actual) >= buf->size_in_periods) {
-				buf->w_in_periods -= buf->size_in_periods;
+			if ((actual = snd_pcm_readi(driver->capture_handle, driver->samples, avail)) < 0) {
+				printf ("read failed %s\n", snd_strerror (actual));
+				exit(1);
 			}
 #endif
 			ret = avail;
@@ -687,37 +706,33 @@ int alsa_driver_read(alsa_driver_t* driver, buffer_t* buf)
 	return ret;
 }
 
+void setscheduler(void)
+{
+	struct sched_param sched_param;
+
+	if (sched_getparam(0, &sched_param) < 0) {
+		printf("Scheduler getparam failed...\n");
+		return;
+	}
+	sched_param.sched_priority = sched_get_priority_max(SCHED_RR) - 10;
+	if (!sched_setscheduler(0, SCHED_RR, &sched_param)) {
+		printf("Scheduler set to Round Robin with priority %i...\n", sched_param.sched_priority);
+		fflush(stdout);
+		return;
+	}
+	printf("!!!Scheduler set to Round Robin with priority %i FAILED!!!\n", sched_param.sched_priority);
+}
+
 int main(int argc, char *argv[])
 {
 	alsa_driver_t* driver;
 
 	int r, w;
 	int avail;
-	buffer_t buf;
 
 	printf("ALSA Path-through starting\n");
 
-	buf.size_in_periods = BUFFER_SIZE_IN_PERIODS*2;
-	buf.r_in_periods = 0;
-	buf.w_in_periods = 0;
-#if MMAP_ACCESS_ENABLED
-	if(NULL == (buf.samples[0] = malloc(buf.size_in_periods*sizeof(int))))
-	{
-		printf("can not allocate memory for ring buffer\n");
-		return 0;
-	}
-	if(NULL == (buf.samples[1] = malloc(buf.size_in_periods*sizeof(int))))
-	{
-		printf("can not allocate memory for ring buffer\n");
-		return 0;
-	}
-#else
-	if(NULL == (buf.samples = malloc(buf.size_in_periods*2*sizeof(int))))
-	{
-		printf("can not allocate memory for ring buffer\n");
-		return 0;
-	}
-#endif
+	//setscheduler ();
 
 	if(NULL == (driver = alsa_driver_new()))
 	{
@@ -733,28 +748,24 @@ int main(int argc, char *argv[])
 		return 0;
 	}
 
-	r = 0;
-	w = 0;
-
-#if MMAP_ACCESS_ENABLED == 0
 	printf("Audio Interface prepared for start\n");
 
-	w = alsa_driver_write(driver, ProcessStereo, &buf);
-	//printf("W: buf.w %d, buf.r %d, buf.size %d\n", buf.w_in_periods, buf.r_in_periods, buf.size_in_periods);
-#endif
+	alsa_driver_start(driver);
 
 	printf("Audio started\n");
+
+	r = 0;
+	w = 0;
 
 	while (1)
 	{
 #if POLLING_ENABLED
 		int poll_time = alsa_driver_wait(driver);
-		printf("poll %d, DSP usage %d%%\n",poll_time, (int)(100*poll_time/(float)PERIOD_TIME));
+		printf("poll %d, DSP usage %d%%\n",poll_time, (int)(100*(1-poll_time/(float)PERIOD_TIME)));
 #endif
 
 #if CAPTURE_ENABLED
-		avail = alsa_driver_read(driver, &buf);
-		//if(avail) printf("R: buf.w %d, buf.r %d, buf.size %d\n", buf.w_in_periods, buf.r_in_periods, buf.size_in_periods);
+		avail = alsa_driver_read(driver);
 		r += avail;
 		if(r >= SAMPLERATE)
 		{
@@ -764,8 +775,7 @@ int main(int argc, char *argv[])
 		}
 #endif
 
-		avail = alsa_driver_write(driver, ProcessStereo, &buf);
-		//if(avail) printf("W: buf.w %d, buf.r %d, buf.size %d\n", buf.w_in_periods, buf.r_in_periods, buf.size_in_periods);
+		avail = alsa_driver_write(driver, ProcessStereo);
 
 		w += avail;
 		if(w >= SAMPLERATE)
