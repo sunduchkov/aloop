@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <sched.h>
 #include <inttypes.h>
+#include <getopt.h>
 #include <alsa/asoundlib.h>
 #include <alsa/pcm.h>
 
@@ -28,26 +29,21 @@
 // is divided to small chunks. Device acknowledges to application when the transfer of a chunk is complete.
 //
 
-// parameters
+// default parameters (can be overwritten by command line options)
 
-#define SAMPLERATE				48000
+#define DEFAULT_SAMPLERATE		48000
+#define DEFAULT_PERIOD_SIZE		360//1440//512	// frames number between PCM interrupts
+#define DEFAULT_BUFFER_SIZE		(2*DEFAULT_PERIOD_SIZE)	// ring buffer in frames. should be at least 2 periods
+#define DEFAULT_PLAYBACK_DEVICE	"plughw:1,0"
+#define DEFAULT_CAPTURE_DEVICE	"plughw:1,0"
+#define DEFAULT_POLLING_USAGE	0
+
+// fixed parameters
+
 #define NCHANNELS				2				// stereo signal, two samples in one frame
-#define PERIOD_SIZE				1440//512//360		// frames number between PCM interrupts
-#define BUFFER_SIZE				(2*PERIOD_SIZE)	// ring buffer in frames. should be at least 2 periods
-
 #define CAPTURE_ENABLED			1
 #define MMAP_ACCESS_ENABLED		0
-#define POLLING_ENABLED			0
 #define	USING_SYSTEM_POLL		1
-
-// calculated constants
-
-#define PERIOD_TIME				(PERIOD_SIZE * 1000 / SAMPLERATE) // [ms] between PCM interrupts
-#define BUFFER_TIME				(BUFFER_SIZE * 1000 / SAMPLERATE)
-#define LATENCY					BUFFER_TIME
-
-#define AVAIL_READ_MIN			(PERIOD_SIZE/2)//1024
-#define AVAIL_WRITE_MIN			(PERIOD_SIZE/2)//1024
 
 #if MMAP_ACCESS_ENABLED
 typedef void (*process_t)(int* pSamplesIn[NCHANNELS], int* pSamplesOut[NCHANNELS], int nLength);
@@ -57,31 +53,38 @@ typedef void (*process_t)(int* pSamplesIn, int* pSamplesOut, int nLength);
 
 typedef struct _alsa_driver
 {
-    snd_pcm_t                    *playback_handle;
-    snd_pcm_t                    *capture_handle;
-    snd_ctl_t                    *ctl_handle;
+    snd_pcm_t              	*playback_handle;
+    snd_pcm_t               *capture_handle;
+    snd_ctl_t               *ctl_handle;
 
-    char                         *alsa_driver_name;
-    char                         *alsa_name_playback;
-    char                         *alsa_name_capture;
+    char                    *alsa_driver_name;
+    char                    *alsa_name_playback;
+    char                    *alsa_name_capture;
 
 #if MMAP_ACCESS_ENABLED
-    int 						 *capture_addr[NCHANNELS];
-    int 						 *playback_addr[NCHANNELS];
-    unsigned long                 capture_interleave_skip[NCHANNELS];
-    unsigned long                 playback_interleave_skip[NCHANNELS];
+    int 					*capture_addr[NCHANNELS];
+    int 					*playback_addr[NCHANNELS];
+    unsigned long           capture_interleave_skip[NCHANNELS];
+    unsigned long           playback_interleave_skip[NCHANNELS];
 #else
-    int 						  samples[BUFFER_SIZE*NCHANNELS];
+    int 					*samples;
 #endif
 
 #if USING_SYSTEM_POLL
-    struct pollfd                *pfd;
-    unsigned int                  playback_nfds;
-    unsigned int                  capture_nfds;
+    struct pollfd           *pfd;
+    unsigned int            playback_nfds;
+    unsigned int            capture_nfds;
 #endif
 
-    int                           capture_and_playback_not_synced;
-	int                      	  poll_timeout;
+    int                     capture_and_playback_not_synced;
+
+	unsigned int			sample_rate;
+	snd_pcm_uframes_t		period_size;
+	snd_pcm_uframes_t		buffer_size;
+	snd_pcm_uframes_t		avail_min;
+	int						latency;
+	int						use_polling;
+	int                    	polling_timeout;
 
 }	alsa_driver_t;
 
@@ -146,15 +149,12 @@ static void ProcessStereo(int* samplesIn, int* samplesOut, int N)
 }
 #endif
 
-static int open_stream(snd_pcm_t **handle, const char *name, int dir)
+static int open_stream(alsa_driver_t* driver, snd_pcm_t **handle, const char *name, int dir)
 {
 	snd_pcm_hw_params_t *hw_params;
 	snd_pcm_sw_params_t *sw_params;
 	const char *dirname = (dir == SND_PCM_STREAM_PLAYBACK) ? "PLAYBACK" : "CAPTURE";
-	unsigned int rate = SAMPLERATE;
 	unsigned int format = SND_PCM_FORMAT_S32_LE;
-	snd_pcm_uframes_t buffer_size = BUFFER_SIZE;
-	snd_pcm_uframes_t period_size = PERIOD_SIZE;
 	int err;
 
 	if ((err = snd_pcm_open(handle, name, dir, SND_PCM_NONBLOCK)) < 0) {
@@ -195,26 +195,26 @@ static int open_stream(snd_pcm_t **handle, const char *name, int dir)
 		return err;
 	}
 
-	if ((err = snd_pcm_hw_params_set_buffer_size_near(*handle, hw_params, &buffer_size)) < 0) {
+	if ((err = snd_pcm_hw_params_set_buffer_size_near(*handle, hw_params, &driver->buffer_size)) < 0) {
 		fprintf(stderr, "%s (%s): cannot set buffer time (%s)\n",
 			name, dirname, snd_strerror(err));
 		return err;
 	}
-	printf("Actual buffer size %d = %d [ms]\n", (int)buffer_size, (int)buffer_size*1000/SAMPLERATE);
+	printf("Actual buffer size %d = %d [ms]\n", (int)driver->buffer_size, (int)driver->buffer_size*1000/driver->sample_rate);
 
-	if ((err = snd_pcm_hw_params_set_period_size_near(*handle, hw_params, &period_size, 0)) < 0) {
+	if ((err = snd_pcm_hw_params_set_period_size_near(*handle, hw_params, &driver->period_size, 0)) < 0) {
 		fprintf(stderr, "%s (%s): cannot set period time (%s)\n",
 			name, dirname, snd_strerror(err));
 		return err;
 	}
-	printf("Actual period size %d = %d [ms]\n", (int)period_size, (int)period_size*1000/SAMPLERATE);
+	printf("Actual period size %d = %d [ms]\n", (int)driver->period_size, (int)driver->period_size*1000/driver->sample_rate);
 
-	if ((err = snd_pcm_hw_params_set_rate_near(*handle, hw_params, &rate, NULL)) < 0) {
+	if ((err = snd_pcm_hw_params_set_rate_near(*handle, hw_params, &driver->sample_rate, NULL)) < 0) {
 		fprintf(stderr, "%s (%s): cannot set sample rate(%s)\n",
 			name, dirname, snd_strerror(err));
 		return err;
 	}
-	printf("Actual sample rate %d\n", rate);
+	printf("Actual sample rate %d\n", driver->sample_rate);
 
 	if ((err = snd_pcm_hw_params_set_channels(*handle, hw_params, NCHANNELS)) < 0) {
 		fprintf(stderr, "%s (%s): cannot set channel count(%s)\n",
@@ -240,7 +240,7 @@ static int open_stream(snd_pcm_t **handle, const char *name, int dir)
 			name, dirname, snd_strerror(err));
 		return err;
 	}
-	if ((err = snd_pcm_sw_params_set_avail_min(*handle, sw_params, BUFFER_SIZE/2)) < 0) {
+	if ((err = snd_pcm_sw_params_set_avail_min(*handle, sw_params, driver->period_size)) < 0) {
 		fprintf(stderr, "%s (%s): cannot set minimum available count(%s)\n",
 			name, dirname, snd_strerror(err));
 		return err;
@@ -292,21 +292,15 @@ get_control_device_name(const char * device_name)
     return ctl_name;
 }
 
-alsa_driver_t* alsa_driver_new()
+int alsa_driver_new(alsa_driver_t* driver)
 {
-	alsa_driver_t* driver;
 	snd_ctl_card_info_t *card_info;
 	char * ctl_name;
 	int err;
 	uint64_t period_usecs;
 
-	driver = (alsa_driver_t *) calloc (1, sizeof (alsa_driver_t));
-
 	driver->playback_handle = NULL;
 	driver->capture_handle = NULL;
-
-	driver->alsa_name_playback = strdup ("hw:0,0");
-	driver->alsa_name_capture = strdup ("hw:0,0");
 
 	snd_ctl_card_info_alloca (&card_info);
 
@@ -327,14 +321,20 @@ alsa_driver_t* alsa_driver_new()
 
 	free(ctl_name);
 
+#if MMAP_ACCESS_ENABLED == 0
+	if(NULL == (driver->samples = malloc(driver->buffer_size*NCHANNELS*sizeof(int)))) {
+		printf("cannot allocate memory for sample buffer");
+		return 0;
+	}
+#endif
 
-	if ((err = open_stream(&driver->playback_handle, driver->alsa_name_playback, SND_PCM_STREAM_PLAYBACK)) < 0)
-		return NULL;
+	if ((err = open_stream(driver, &driver->playback_handle, driver->alsa_name_playback, SND_PCM_STREAM_PLAYBACK)) < 0)
+		return 0;
 	printf("Playback opened\n");
 
 #if CAPTURE_ENABLED
-	if ((err = open_stream(&driver->capture_handle, driver->alsa_name_capture, SND_PCM_STREAM_CAPTURE)) < 0)
-		return NULL;
+	if ((err = open_stream(driver, &driver->capture_handle, driver->alsa_name_capture, SND_PCM_STREAM_CAPTURE)) < 0)
+		return 0;
 	printf("Capture opened\n");
 #endif
 
@@ -347,19 +347,21 @@ alsa_driver_t* alsa_driver_new()
 		}
 	}
 
-	period_usecs = (uint64_t) floor ((((float) PERIOD_SIZE) / SAMPLERATE) * 1000000.0f);
-	driver->poll_timeout = (int) floor (1.5f * period_usecs /1000.0);
+	period_usecs = (uint64_t) floor ((((float) driver->period_size) / driver->sample_rate) * 1000000.0f);
+	driver->polling_timeout = (int) floor (1.5f * period_usecs /1000.0);
 
-#if POLLING_ENABLED
-	printf("polling timeout %d [ms]\n", driver->poll_timeout);
-#endif
+	if(driver->use_polling) {
+		printf("polling timeout %d [ms]\n", driver->polling_timeout);
+	}
+
+	driver->latency = driver->buffer_size * 1000 / driver->sample_rate;
 
 	if(0 == driver->capture_and_playback_not_synced)
 	{
 		printf("Playback and Capture are synced\n");
 	}
 
-	return driver;
+	return 1;
 }
 
 #if MMAP_ACCESS_ENABLED
@@ -431,10 +433,6 @@ int alsa_driver_prepare(alsa_driver_t* driver)
 		driver->capture_nfds = 0;
 	}
 
-	if (driver->pfd) {
-		free (driver->pfd);
-	}
-
 	driver->pfd = (struct pollfd *)
 		malloc (sizeof (struct pollfd) *
 			(driver->playback_nfds + driver->capture_nfds + 2));
@@ -481,7 +479,7 @@ int alsa_driver_start(alsa_driver_t* driver)
 
 	avail = snd_pcm_avail_update (driver->playback_handle);
 
-	if (avail != BUFFER_SIZE) {
+	if (avail != driver->buffer_size) {
 		printf ("ALSA: full buffer not available at start, %u\n", (unsigned int)avail);
 		return -1;
 	}
@@ -505,7 +503,7 @@ int alsa_driver_start(alsa_driver_t* driver)
 		return 0;
 	}
 #else
-	memset (driver->samples, 0, BUFFER_SIZE*NCHANNELS*sizeof(int));
+	memset (driver->samples, 0, driver->buffer_size*NCHANNELS*sizeof(int));
 
 	if ((err = snd_pcm_writei(driver->playback_handle, driver->samples, avail)) < 0) {
 		printf ("write failed %s\n", snd_strerror (err));
@@ -517,13 +515,15 @@ int alsa_driver_start(alsa_driver_t* driver)
 
 int alsa_driver_wait(alsa_driver_t* driver)
 {
+	if(!driver->use_polling) return 0;
+
 	int ret;
 
 #if USING_SYSTEM_POLL
 	int i;
 
 	int nfds = 0;
-	int ci;
+	int ci = 0;
 	uint64_t poll_start, poll_end;
 
 	if (driver->playback_handle) {
@@ -549,7 +549,7 @@ int alsa_driver_wait(alsa_driver_t* driver)
 
 	poll_start = get_microseconds_from_system();
 
-	int poll_result = poll (driver->pfd, nfds, driver->poll_timeout);
+	int poll_result = poll (driver->pfd, nfds, driver->polling_timeout);
 	if (poll_result < 0) {
 
 		if (errno == EINTR) {
@@ -597,7 +597,7 @@ int alsa_driver_wait(alsa_driver_t* driver)
 		}
 	}
 #else
-	if ((ret = snd_pcm_wait (driver->playback_handle, driver->poll_timeout)) == 0) {
+	if ((ret = snd_pcm_wait (driver->playback_handle, driver->polling_timeout)) == 0) {
 			printf ("PCM wait failed, driver timeout\n");
 	}
 #endif
@@ -618,10 +618,10 @@ int alsa_driver_write(alsa_driver_t* driver, process_t process)
 	if(driver->playback_handle)
 	{
 		avail = snd_pcm_avail_update(driver->playback_handle);
-		if (avail >= AVAIL_WRITE_MIN)
+		if (avail >= driver->avail_min)
 		{
-			if (avail > BUFFER_SIZE)
-				avail = BUFFER_SIZE;
+			if (avail > driver->buffer_size)
+				avail = driver->buffer_size;
 
 #if MMAP_ACCESS_ENABLED
 			if ((err = get_channel_address(
@@ -673,10 +673,10 @@ int alsa_driver_read(alsa_driver_t* driver)
 	if (driver->capture_handle)
 	{
 		avail = snd_pcm_avail_update(driver->capture_handle);
-		if (avail >= AVAIL_READ_MIN)
+		if (avail >= driver->avail_min)
 		{
-			if (avail > BUFFER_SIZE)
-				avail = BUFFER_SIZE;
+			if (avail > driver->buffer_size)
+				avail = driver->buffer_size;
 
 #if MMAP_ACCESS_ENABLED
 			if ((err = get_channel_address(
@@ -714,33 +714,114 @@ void setscheduler(void)
 		printf("Scheduler getparam failed...\n");
 		return;
 	}
-	sched_param.sched_priority = sched_get_priority_max(SCHED_RR) - 10;
-	if (!sched_setscheduler(0, SCHED_RR, &sched_param)) {
-		printf("Scheduler set to Round Robin with priority %i...\n", sched_param.sched_priority);
+	sched_param.sched_priority = sched_get_priority_max(SCHED_FIFO) - 10;
+	if (!sched_setscheduler(0, SCHED_FIFO, &sched_param)) {
+		printf("Scheduler set with priority %i...\n", sched_param.sched_priority);
 		fflush(stdout);
 		return;
 	}
-	printf("!!!Scheduler set to Round Robin with priority %i FAILED!!!\n", sched_param.sched_priority);
+	printf("!!!Scheduler set with priority %i FAILED!!!\n", sched_param.sched_priority);
+}
+
+int alsa_driver_get_options(alsa_driver_t* driver, int argc, char *argv[])
+{
+	int needhelp = 0;
+	struct option long_option[] =
+	{
+		{"help", no_argument, NULL, 'h'},
+		{"pdevice", required_argument, NULL, 'P'},
+		{"cdevice", required_argument, NULL, 'C'},
+		{"rate", required_argument, NULL, 'r'},
+		{"period", required_argument, NULL, 'p'},
+		{"buffer", required_argument, NULL, 'b'},
+		{"wait", no_argument, NULL, 'w'},
+		{NULL, 0, NULL, 0},
+	};
+
+	int err;
+	int c;
+
+	driver->sample_rate = DEFAULT_SAMPLERATE;
+	driver->use_polling = DEFAULT_POLLING_USAGE;
+	driver->period_size = DEFAULT_PERIOD_SIZE;
+	driver->avail_min = DEFAULT_PERIOD_SIZE/2;
+	driver->buffer_size = DEFAULT_BUFFER_SIZE;
+	driver->alsa_name_playback = strdup(DEFAULT_PLAYBACK_DEVICE);
+	driver->alsa_name_capture = strdup(DEFAULT_CAPTURE_DEVICE);
+
+	while ((c = getopt_long(argc, argv, "hP:C:r:p:b:w", long_option, NULL)) != -1) {
+		switch (c) {
+		case 'h':
+			needhelp = 1;
+			break;
+		case 'P':
+			driver->alsa_name_playback = strdup(optarg);
+			break;
+		case 'C':
+			driver->alsa_name_capture = strdup(optarg);
+			break;
+		case 'r':
+			err = atoi(optarg);
+			driver->sample_rate = err >= 8000 && err <= 48000 ? err : DEFAULT_SAMPLERATE;
+			break;
+		case 'p':
+			err = atoi(optarg);
+			driver->period_size = err >= 32 && err < 200000 ? err : 0;
+			driver->avail_min = driver->period_size/2;
+			break;
+		case 'b':
+			err = atoi(optarg);
+			driver->buffer_size = err >= 32 && err < 200000 ? err : 0;
+			break;
+		case 'w':
+			driver->use_polling = 1;
+			break;
+		}
+	}
+
+	if (needhelp) {
+		printf(
+				"Usage: aloop [OPTIONS]\n"
+				"-h,--help      this message\n"
+				"-P,--pdevice   playback device (plughw:1,0 by default - good for USB connected devices, try hw:0,0 for others)\n"
+				"-C,--cdevice   capture device (plughw:1,0 by default)\n"
+				"-r,--rate      sample rate in [Hz]\n"
+				"-p,--period    period size in frames\n"
+				"-b,--buffer    buffer size in frames (try 2 x period size first)\n"
+				"-w,--wait      wait for event (gives time to another threads - reduces overall CPU usage)\n"
+		);
+	    printf("\n\n");
+		return 0;
+	}
+
+	return 1;
 }
 
 int main(int argc, char *argv[])
 {
-	alsa_driver_t* driver;
+	alsa_driver_t Driver;
+	alsa_driver_t* driver = &Driver;
 
 	int r, w;
 	int avail;
+	int err;
 
 	printf("ALSA Path-through starting\n");
 
+	if(0 == (err = alsa_driver_get_options(driver, argc, argv)))
+	{
+		exit(1);
+	}
+
 	//setscheduler ();
 
-	if(NULL == (driver = alsa_driver_new()))
+	if(0 == alsa_driver_new(driver))
 	{
 		printf("alsa_driver_new not succeeded\n");
 		return 0;
 	}
 
-	printf("Audio Interface \"%s\" initialized with %d [ms] latency\n", driver->alsa_driver_name, LATENCY);
+	printf("Audio Interface \"%s\" initialized with %d [ms] latency\n", driver->alsa_driver_name, driver->latency);
 
 	if(!alsa_driver_prepare(driver))
 	{
@@ -759,15 +840,15 @@ int main(int argc, char *argv[])
 
 	while (1)
 	{
-#if POLLING_ENABLED
-		int poll_time = alsa_driver_wait(driver);
-		printf("poll %d, DSP usage %d%%\n",poll_time, (int)(100*(1-poll_time/(float)PERIOD_TIME)));
-#endif
+		alsa_driver_wait(driver);
+		//int poll_time = alsa_driver_wait(driver);
+		//int period_time = driver->period_size * 1000 / driver->sample_rate;
+		//if(poll_time) printf("poll %d, DSP usage %d%%\n",poll_time, (int)(100*(1-poll_time/(float)period_time)));
 
 #if CAPTURE_ENABLED
 		avail = alsa_driver_read(driver);
 		r += avail;
-		if(r >= SAMPLERATE)
+		if(r >= driver->sample_rate)
 		{
 			printf(".");
 			fflush(stdout);
@@ -778,7 +859,7 @@ int main(int argc, char *argv[])
 		avail = alsa_driver_write(driver, ProcessStereo);
 
 		w += avail;
-		if(w >= SAMPLERATE)
+		if(w >= driver->sample_rate)
 		{
 			printf("+");
 			fflush(stdout);
