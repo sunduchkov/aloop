@@ -32,11 +32,11 @@
 // default parameters (can be overwritten by command line options)
 
 #define DEFAULT_SAMPLERATE		48000
-#define DEFAULT_PERIOD_SIZE		360//1440//512	// frames number between PCM interrupts
+#define DEFAULT_PERIOD_SIZE		96						// frames number between PCM interrupts (2 ms)
 #define DEFAULT_BUFFER_SIZE		(2*DEFAULT_PERIOD_SIZE)	// ring buffer in frames. should be at least 2 periods
 #define DEFAULT_PLAYBACK_DEVICE	"plughw:1,0"
 #define DEFAULT_CAPTURE_DEVICE	"plughw:1,0"
-#define DEFAULT_POLLING_USAGE	0
+#define DEFAULT_POLLING_USAGE	1
 
 // fixed parameters
 
@@ -734,7 +734,7 @@ int alsa_driver_get_options(alsa_driver_t* driver, int argc, char *argv[])
 		{"rate", required_argument, NULL, 'r'},
 		{"period", required_argument, NULL, 'p'},
 		{"buffer", required_argument, NULL, 'b'},
-		{"wait", no_argument, NULL, 'w'},
+		{"wait", required_argument, NULL, 'w'},
 		{NULL, 0, NULL, 0},
 	};
 
@@ -749,7 +749,7 @@ int alsa_driver_get_options(alsa_driver_t* driver, int argc, char *argv[])
 	driver->alsa_name_playback = strdup(DEFAULT_PLAYBACK_DEVICE);
 	driver->alsa_name_capture = strdup(DEFAULT_CAPTURE_DEVICE);
 
-	while ((c = getopt_long(argc, argv, "hP:C:r:p:b:w", long_option, NULL)) != -1) {
+	while ((c = getopt_long(argc, argv, "hP:C:r:p:b:w:", long_option, NULL)) != -1) {
 		switch (c) {
 		case 'h':
 			needhelp = 1;
@@ -774,7 +774,8 @@ int alsa_driver_get_options(alsa_driver_t* driver, int argc, char *argv[])
 			driver->buffer_size = err >= 32 && err < 200000 ? err : 0;
 			break;
 		case 'w':
-			driver->use_polling = 1;
+			err = atoi(optarg);
+			driver->use_polling = err > 0 ? 1 : 0;
 			break;
 		}
 	}
@@ -788,7 +789,7 @@ int alsa_driver_get_options(alsa_driver_t* driver, int argc, char *argv[])
 				"-r,--rate      sample rate in [Hz]\n"
 				"-p,--period    period size in frames\n"
 				"-b,--buffer    buffer size in frames (try 2 x period size first)\n"
-				"-w,--wait      wait for event (gives time to another threads - reduces overall CPU usage)\n"
+				"-w,--wait      1 - wait for event, 0 - do not wait. Wait gives time to another threads - reduces overall CPU usage\n"
 		);
 	    printf("\n\n");
 		return 0;
@@ -833,7 +834,7 @@ int main(int argc, char *argv[])
 
 	alsa_driver_start(driver);
 
-	printf("Audio started\n");
+	// from this point printf can break audio
 
 	r = 0;
 	w = 0;
