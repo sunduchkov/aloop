@@ -7,11 +7,13 @@
  *
  */
 
+#include <unistd.h>
 #include <math.h>
 #include <stdio.h>
 #include <sched.h>
 #include <inttypes.h>
 #include <getopt.h>
+#include <pthread.h>
 #include <alsa/asoundlib.h>
 #include <alsa/pcm.h>
 
@@ -44,6 +46,9 @@
 #define CAPTURE_ENABLED			1
 #define MMAP_ACCESS_ENABLED		0
 #define	USING_SYSTEM_POLL		1
+
+#define PIPE_NAME 				"alooppipe"
+
 
 #if MMAP_ACCESS_ENABLED
 typedef void (*process_t)(int* pSamplesIn[NCHANNELS], int* pSamplesOut[NCHANNELS], int nLength);
@@ -85,6 +90,8 @@ typedef struct _alsa_driver
 	int						latency;
 	int						use_polling;
 	int                    	polling_timeout;
+
+	int	loop;
 
 }	alsa_driver_t;
 
@@ -261,6 +268,21 @@ static int open_stream(alsa_driver_t* driver, snd_pcm_t **handle, const char *na
 	return 0;
 }
 
+/**
+ *  print short information on the audio device
+ */
+void printCardInfo(snd_ctl_card_info_t*	ci)
+{
+	printf("Card info\n");
+	printf("\tID         = %s\n", snd_ctl_card_info_get_id(ci));
+	printf("\tDriver     = %s\n", snd_ctl_card_info_get_driver(ci));
+	printf("\tName       = %s\n", snd_ctl_card_info_get_name(ci));
+	printf("\tLongName   = %s\n", snd_ctl_card_info_get_longname(ci));
+	printf("\tMixerName  = %s\n", snd_ctl_card_info_get_mixername(ci));
+	printf("\tComponents = %s\n", snd_ctl_card_info_get_components(ci));
+	printf("--------------\n");
+}
+
 static char*
 get_control_device_name(const char * device_name)
 {
@@ -316,6 +338,8 @@ int alsa_driver_new(alsa_driver_t* driver)
 			    driver->alsa_name_playback, snd_strerror (err));
 		snd_ctl_close (driver->ctl_handle);
 	}
+
+	printCardInfo(card_info);
 
 	driver->alsa_driver_name = strdup(snd_ctl_card_info_get_driver (card_info));
 
@@ -393,12 +417,6 @@ int alsa_driver_prepare(alsa_driver_t* driver)
 {
 	int err;
 
-#if MMAP_ACCESS_ENABLED
-    char* playback_addr[NCHANNELS];
-	snd_pcm_uframes_t avail;
-	snd_pcm_uframes_t offset;
-#endif
-
 	if (driver->playback_handle) {
 		if ((err = snd_pcm_prepare (driver->playback_handle)) < 0) {
 			printf ("ALSA: prepare error for playback on "
@@ -438,33 +456,6 @@ int alsa_driver_prepare(alsa_driver_t* driver)
 			(driver->playback_nfds + driver->capture_nfds + 2));
 #endif
 
-#if MMAP_ACCESS_ENABLED
-	avail = snd_pcm_avail_update (driver->playback_handle);
-
-	if (avail != BUFFER_SIZE) {
-		printf ("ALSA: full buffer not available at start, %u\n", (unsigned int)avail);
-		return -1;
-	}
-
-	if ((err = get_channel_address(
-			driver->playback_handle,
-			&offset, &avail, playback_addr, driver->playback_interleave_skip) < 0)) {
-		printf ("ALSA: %s: mmap areas info error ", driver->alsa_name_playback);
-		return -1;
-	}
-
-	if ((err = snd_pcm_mmap_commit (driver->playback_handle, offset, avail)) < 0) {
-		printf ("ALSA: could not complete playback of %u frames: error = %d", (unsigned int)avail, err);
-		if (err != -EPIPE && err != -ESTRPIPE)
-			return -1;
-	}
-
-	if ((err = snd_pcm_start (driver->playback_handle)) < 0) {
-		fprintf(stderr, "cannot start audio interface for playback (%s)\n",
-			 snd_strerror(err));
-		return 0;
-	}
-#endif
 	return 1;
 }
 
@@ -798,13 +789,52 @@ int alsa_driver_get_options(alsa_driver_t* driver, int argc, char *argv[])
 	return 1;
 }
 
+void* start_routine(void* p)
+{
+	alsa_driver_t* driver = (alsa_driver_t*)p;
+	int r, w;
+	int avail;
+
+	alsa_driver_start(driver);
+
+	r = 0;
+	w = 0;
+
+	while (driver->loop)
+	{
+		alsa_driver_wait(driver);
+
+		avail = alsa_driver_read(driver);
+		r += avail;
+		if(r >= driver->sample_rate)
+		{
+			printf(".");
+			fflush(stdout);
+			r = 0;
+		}
+
+		avail = alsa_driver_write(driver, ProcessStereo);
+
+		w += avail;
+		if(w >= driver->sample_rate)
+		{
+			printf("+");
+			fflush(stdout);
+			w = 0;
+		}
+
+	}
+
+	return NULL;
+}
+
 int main(int argc, char *argv[])
 {
 	alsa_driver_t Driver;
 	alsa_driver_t* driver = &Driver;
 
-	int r, w;
-	int avail;
+	//int r, w;
+	//int avail;
 	int err;
 
 	printf("ALSA Path-through starting\n");
@@ -832,6 +862,69 @@ int main(int argc, char *argv[])
 
 	printf("Audio Interface prepared for start\n");
 
+	driver->loop = 1;
+
+	pthread_t thread;
+	pthread_attr_t attr;
+
+	if(0 != pthread_attr_init(&attr)) {
+		printf("pthread_attr_init: error");
+		exit(1);
+	}
+
+	if(0 != pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED)) {
+		printf("pthread_attr_setdetachstate: error");
+		exit(1);
+	}
+
+	if(0 != pthread_attr_setinheritsched(&attr, PTHREAD_EXPLICIT_SCHED)) {
+		printf("pthread_attr_setinheritsched: error");
+		exit(1);
+	}
+
+	if(0 != (err = pthread_create(&thread, &attr, start_routine, driver)))
+	{
+		if(EAGAIN == err) {
+			printf("pthread_create: \n");
+		}
+		if(EINVAL == err) {
+			printf("pthread_create: Invalid settings in attr\n");
+		}
+		if(EPERM == err) {
+			printf("pthread_create:No permission to set the scheduling policy and parameters specified in attr\n");
+		}
+		exit(1);
+	}
+
+    int pipe;
+	if(-1 == (pipe = open(PIPE_NAME,O_RDONLY)))
+	{
+		printf("Can not open pipe (%s)\n", strerror(errno));
+		exit(1);
+	}
+
+    int len;
+    char buf[100];
+
+	while(1)
+	{
+        memset(buf, 0, sizeof(buf));
+        if ( (len = read(pipe, buf, sizeof(buf)-1)) <= 0 ) {
+            perror("read");
+            driver->loop = 0;
+            break;
+        }
+        printf("Incoming message (%d): %s\n", len, buf);
+
+	}
+
+	if(0 != pthread_join(thread, NULL)) {
+		printf("pthread_join: error");
+		exit(1);
+	}
+
+
+#if 0
 	alsa_driver_start(driver);
 
 	// from this point printf can break audio
@@ -868,6 +961,7 @@ int main(int argc, char *argv[])
 		}
 
 	}
+#endif
 
 	return 0;
 }
