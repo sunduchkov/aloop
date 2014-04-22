@@ -896,6 +896,13 @@ int main(int argc, char *argv[])
 		exit(1);
 	}
 
+	struct sched_param param;
+	param.sched_priority = sched_get_priority_max(SCHED_FIFO) - 10;
+	if(0 != pthread_setschedparam(thread, SCHED_FIFO, &param)) {
+		printf("pthread_setschedparam: error\n");
+		exit(1);
+	}
+
     int pipe;
 	if(-1 == (pipe = open(PIPE_NAME,O_RDONLY)))
 	{
