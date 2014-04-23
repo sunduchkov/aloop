@@ -17,6 +17,8 @@
 #include <alsa/asoundlib.h>
 #include <alsa/pcm.h>
 
+#include "getparams.h"
+
 //
 // ALSA terminology
 //
@@ -42,6 +44,7 @@
 
 // fixed parameters
 
+#define REALTIMEAUDIO_ENABLED	0
 #define NCHANNELS				2				// stereo signal, two samples in one frame
 #define CAPTURE_ENABLED			1
 #define MMAP_ACCESS_ENABLED		0
@@ -833,8 +836,6 @@ int main(int argc, char *argv[])
 	alsa_driver_t Driver;
 	alsa_driver_t* driver = &Driver;
 
-	//int r, w;
-	//int avail;
 	int err;
 
 	printf("ALSA Path-through starting\n");
@@ -844,8 +845,7 @@ int main(int argc, char *argv[])
 		exit(1);
 	}
 
-	//setscheduler ();
-
+#if REALTIMEAUDIO_ENABLED
 	if(0 == alsa_driver_new(driver))
 	{
 		printf("alsa_driver_new not succeeded\n");
@@ -902,71 +902,31 @@ int main(int argc, char *argv[])
 		printf("pthread_setschedparam: error\n");
 		exit(1);
 	}
+#endif
 
-    int pipe;
-	if(-1 == (pipe = open(PIPE_NAME,O_RDONLY)))
-	{
-		printf("Can not open pipe (%s)\n", strerror(errno));
+	getparams_t params;
+	if(!getparams_start(&params)) {
 		exit(1);
 	}
 
-    int len;
-    char buf[100];
+	printf("Waiting for connection...\n");
 
-	while(1)
-	{
-        memset(buf, 0, sizeof(buf));
-        if ( (len = read(pipe, buf, sizeof(buf)-1)) <= 0 ) {
-            perror("read");
-            driver->loop = 0;
-            break;
-        }
-        printf("Incoming message (%d): %s\n", len, buf);
+	while(1) {
+		if(getparams_connect(&params)) {
+			printf("Incoming connection accepted\n");
+		}
 
+		if(getparams_get(&params)) {
+			printf("%d %f\n", params.nNumber, params.fValue);
+		}
 	}
 
+	getparams_stop(&params);
+
+#if REALTIMEAUDIO_ENABLED
 	if(0 != pthread_join(thread, NULL)) {
 		printf("pthread_join: error");
 		exit(1);
-	}
-
-
-#if 0
-	alsa_driver_start(driver);
-
-	// from this point printf can break audio
-
-	r = 0;
-	w = 0;
-
-	while (1)
-	{
-		alsa_driver_wait(driver);
-		//int poll_time = alsa_driver_wait(driver);
-		//int period_time = driver->period_size * 1000 / driver->sample_rate;
-		//if(poll_time) printf("poll %d, DSP usage %d%%\n",poll_time, (int)(100*(1-poll_time/(float)period_time)));
-
-#if CAPTURE_ENABLED
-		avail = alsa_driver_read(driver);
-		r += avail;
-		if(r >= driver->sample_rate)
-		{
-			printf(".");
-			fflush(stdout);
-			r = 0;
-		}
-#endif
-
-		avail = alsa_driver_write(driver, ProcessStereo);
-
-		w += avail;
-		if(w >= driver->sample_rate)
-		{
-			printf("+");
-			fflush(stdout);
-			w = 0;
-		}
-
 	}
 #endif
 
