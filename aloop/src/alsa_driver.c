@@ -33,6 +33,30 @@
 #define DEFAULT_CAPTURE_DEVICE	"plughw:1,0"
 #define DEFAULT_POLLING_USAGE	1
 
+void alsa_printf(alsa_driver_t* driver, const char *fmt, ...)
+{
+	va_list ap;
+	char buffer[300];
+
+	va_start(ap, fmt);
+	vsnprintf(buffer, sizeof(buffer), fmt, ap);
+
+	if(!driver)
+		fprintf(stderr, "%s\n", buffer);
+	else
+		driver->puts(buffer);
+
+	va_end (ap);
+}
+
+int default_alsa_puts(const char *desc)
+{
+	int ret;
+	ret = fprintf(stderr, "%s\n", desc);
+	fflush(stderr);
+	return ret;
+}
+
 uint64_t alsa_get_microseconds()
 {
 	uint64_t t;
@@ -43,7 +67,7 @@ uint64_t alsa_get_microseconds()
 	return t;
 }
 
-static int open_stream(alsa_driver_t* driver, snd_pcm_t **handle, const char *name, int dir)
+static alsa_status_t open_stream(alsa_driver_t* driver, snd_pcm_t **handle, const char *name, int dir)
 {
 	snd_pcm_hw_params_t *hw_params;
 	snd_pcm_sw_params_t *sw_params;
@@ -51,108 +75,102 @@ static int open_stream(alsa_driver_t* driver, snd_pcm_t **handle, const char *na
 	unsigned int format = SND_PCM_FORMAT_S32_LE;
 	int err;
 
+	if(!driver || !name) {
+		alsa_printf(driver, "open_stream with NULL pointer");
+		return ALSA_STATUS_NULL_POINTER;
+	}
+
 	if ((err = snd_pcm_open(handle, name, dir, SND_PCM_NONBLOCK)) < 0) {
-		fprintf(stderr, "%s (%s): cannot open audio device (%s) in SND_PCM_NONBLOCK mode\n",
+		alsa_printf(driver, "%s (%s): cannot open audio device (%s) in SND_PCM_NONBLOCK mode",
 			name, dirname, snd_strerror(err));
-		return err;
+		return ALSA_STATUS_ERROR;
 	}
 
 	if ((err = snd_pcm_hw_params_malloc(&hw_params)) < 0) {
-		fprintf(stderr, "%s (%s): cannot allocate hardware parameter structure(%s)\n",
+		alsa_printf(driver, "%s (%s): cannot allocate hardware parameter structure(%s)",
 			name, dirname, snd_strerror(err));
-		return err;
+		return ALSA_STATUS_MEMORY_ERROR;
 	}
 
 	if ((err = snd_pcm_hw_params_any(*handle, hw_params)) < 0) {
-		fprintf(stderr, "%s (%s): cannot initialize hardware parameter structure(%s)\n",
+		alsa_printf(driver, "%s (%s): cannot initialize hardware parameter structure(%s)",
 			name, dirname, snd_strerror(err));
-		return err;
+		return ALSA_STATUS_ERROR;
 	}
 
 #if MMAP_ACCESS_ENABLED
 	if ((err = snd_pcm_hw_params_set_access(*handle, hw_params, SND_PCM_ACCESS_MMAP_INTERLEAVED  )) < 0) {
-		fprintf(stderr, "%s (%s): cannot set access type(%s)\n",
+		alsa_printf(driver, "%s (%s): cannot set access type(%s)",
 			name, dirname, snd_strerror(err));
-		return err;
+		return ALSA_STATUS_ERROR;
 	}
 #else
 	if ((err = snd_pcm_hw_params_set_access(*handle, hw_params, SND_PCM_ACCESS_RW_INTERLEAVED)) < 0) {
-		fprintf(stderr, "%s (%s): cannot set access type(%s)\n",
+		alsa_printf(driver, "%s (%s): cannot set access type(%s)",
 			name, dirname, snd_strerror(err));
-		return err;
+		return ALSA_STATUS_ERROR;
 	}
 #endif
 
 	if ((err = snd_pcm_hw_params_set_format(*handle, hw_params, format)) < 0) {
-		fprintf(stderr, "%s (%s): cannot set sample format(%s)\n",
-			name, dirname, snd_strerror(err));
-		return err;
+		alsa_printf(driver, "%s (%s): cannot set sample format(%s)", name, dirname, snd_strerror(err));
+		return ALSA_STATUS_ERROR;
 	}
 
 	if ((err = snd_pcm_hw_params_set_buffer_size_near(*handle, hw_params, &driver->buffer_size)) < 0) {
-		fprintf(stderr, "%s (%s): cannot set buffer time (%s)\n",
-			name, dirname, snd_strerror(err));
-		return err;
+		alsa_printf(driver, "%s (%s): cannot set buffer time (%s)",	name, dirname, snd_strerror(err));
+		return ALSA_STATUS_ERROR;
 	}
-	printf("Actual buffer size %d = %d [ms]\n", (int)driver->buffer_size, (int)driver->buffer_size*1000/driver->sample_rate);
+	alsa_printf(driver, "Actual buffer size %d = %d [ms]", (int)driver->buffer_size, (int)driver->buffer_size*1000/driver->sample_rate);
 
 	if ((err = snd_pcm_hw_params_set_period_size_near(*handle, hw_params, &driver->period_size, 0)) < 0) {
-		fprintf(stderr, "%s (%s): cannot set period time (%s)\n",
-			name, dirname, snd_strerror(err));
-		return err;
+		alsa_printf(driver, "%s (%s): cannot set period time (%s)",	name, dirname, snd_strerror(err));
+		return ALSA_STATUS_ERROR;
 	}
-	printf("Actual period size %d = %d [ms]\n", (int)driver->period_size, (int)driver->period_size*1000/driver->sample_rate);
+	alsa_printf(driver, "Actual period size %d = %d [ms]", (int)driver->period_size, (int)driver->period_size*1000/driver->sample_rate);
 
 	if ((err = snd_pcm_hw_params_set_rate_near(*handle, hw_params, &driver->sample_rate, NULL)) < 0) {
-		fprintf(stderr, "%s (%s): cannot set sample rate(%s)\n",
-			name, dirname, snd_strerror(err));
-		return err;
+		alsa_printf(driver, "%s (%s): cannot set sample rate(%s)", name, dirname, snd_strerror(err));
+		return ALSA_STATUS_ERROR;
 	}
-	printf("Actual sample rate %d\n", driver->sample_rate);
+	alsa_printf(driver, "Actual sample rate %d\n", driver->sample_rate);
 
 	if ((err = snd_pcm_hw_params_set_channels(*handle, hw_params, NCHANNELS)) < 0) {
-		fprintf(stderr, "%s (%s): cannot set channel count(%s)\n",
-			name, dirname, snd_strerror(err));
-		return err;
+		alsa_printf(driver, "%s (%s): cannot set channel count(%s)\n", name, dirname, snd_strerror(err));
+		return ALSA_STATUS_ERROR;
 	}
 
 	if ((err = snd_pcm_hw_params(*handle, hw_params)) < 0) {
-		fprintf(stderr, "%s (%s): cannot set parameters(%s)\n",
-			name, dirname, snd_strerror(err));
-		return err;
+		alsa_printf(driver, "%s (%s): cannot set parameters(%s)", name, dirname, snd_strerror(err));
+		return ALSA_STATUS_ERROR;
 	}
 
 	snd_pcm_hw_params_free(hw_params);
 
 	if ((err = snd_pcm_sw_params_malloc(&sw_params)) < 0) {
-		fprintf(stderr, "%s (%s): cannot allocate software parameters structure(%s)\n",
-			name, dirname, snd_strerror(err));
-		return err;
+		alsa_printf(driver, "%s (%s): cannot allocate software parameters structure(%s)", name, dirname, snd_strerror(err));
+		return ALSA_STATUS_MEMORY_ERROR;
 	}
 	if ((err = snd_pcm_sw_params_current(*handle, sw_params)) < 0) {
-		fprintf(stderr, "%s (%s): cannot initialize software parameters structure(%s)\n",
-			name, dirname, snd_strerror(err));
+		alsa_printf(driver, "%s (%s): cannot initialize software parameters structure(%s)", name, dirname, snd_strerror(err));
 		return err;
 	}
 	if ((err = snd_pcm_sw_params_set_avail_min(*handle, sw_params, driver->period_size)) < 0) {
-		fprintf(stderr, "%s (%s): cannot set minimum available count(%s)\n",
-			name, dirname, snd_strerror(err));
-		return err;
+		alsa_printf(driver, "%s (%s): cannot set minimum available count(%s)", name, dirname, snd_strerror(err));
+		return ALSA_STATUS_ERROR;
 	}
 	if ((err = snd_pcm_sw_params_set_start_threshold(*handle, sw_params, 0U)) < 0) {
-		fprintf(stderr, "%s (%s): cannot set start mode(%s)\n",
-			name, dirname, snd_strerror(err));
-		return err;
+		alsa_printf(driver, "%s (%s): cannot set start mode(%s)", name, dirname, snd_strerror(err));
+		return ALSA_STATUS_ERROR;
 	}
 	if ((err = snd_pcm_sw_params(*handle, sw_params)) < 0) {
-		fprintf(stderr, "%s (%s): cannot set software parameters(%s)\n",
-			name, dirname, snd_strerror(err));
-		return err;
+		alsa_printf(driver, "%s (%s): cannot set software parameters(%s)", name, dirname, snd_strerror(err));
+		return ALSA_STATUS_ERROR;
 	}
 
 	snd_pcm_sw_params_free(sw_params);
 
-	return 0;
+	return ALSA_STATUS_OK;
 }
 
 /**
@@ -202,12 +220,72 @@ get_control_device_name(const char * device_name)
     return ctl_name;
 }
 
-int alsa_driver_new(alsa_driver_t* driver)
+alsa_status_t alsa_driver_close(alsa_driver_t* driver)
+{
+	if(!driver) {
+		alsa_printf(driver, "alsa_driver_close with NULL pointer");
+		return ALSA_STATUS_NULL_POINTER;
+	}
+
+	if(driver->playback_handle) {
+		snd_pcm_close(driver->playback_handle);
+		driver->playback_handle = NULL;
+	}
+
+	if(driver->capture_handle) {
+		snd_pcm_close(driver->capture_handle);
+		driver->capture_handle = NULL;
+	}
+
+	if(driver->ctl_handle) {
+		snd_ctl_close(driver->ctl_handle);
+		driver->ctl_handle = NULL;
+	}
+
+#if USING_SYSTEM_POLL
+	if(driver->pfd) {
+		free(driver->pfd);
+		driver->pfd = NULL;
+	}
+#endif
+
+#if MMAP_ACCESS_ENABLED == 0
+	if(driver->samples) {
+		free(driver->samples);
+		driver->samples = NULL;
+	}
+#endif
+
+	if(driver->alsa_driver_name) {
+		free(driver->alsa_driver_name);
+		driver->alsa_driver_name = NULL;
+	}
+
+	if(driver->alsa_name_playback) {
+		free(driver->alsa_name_playback);
+		driver->alsa_name_playback = NULL;
+	}
+
+	if(driver->alsa_name_capture) {
+		free(driver->alsa_name_capture);
+		driver->alsa_name_capture = NULL;
+	}
+
+	return ALSA_STATUS_OK;
+}
+
+alsa_status_t alsa_driver_open(alsa_driver_t* driver)
 {
 	snd_ctl_card_info_t *card_info;
-	char * ctl_name;
-	int err;
+	alsa_status_t status;
 	uint64_t period_usecs;
+	char* ctl_name;
+	int err;
+
+	if(!driver) {
+		alsa_printf(driver, "alsa_driver_open with NULL pointer");
+		return ALSA_STATUS_NULL_POINTER;
+	}
 
 	driver->playback_handle = NULL;
 	driver->capture_handle = NULL;
@@ -219,11 +297,9 @@ int alsa_driver_new(alsa_driver_t* driver)
 	// XXX: I don't know the "right" way to do this. Which to use
 	// driver->alsa_name_playback or driver->alsa_name_capture.
 	if ((err = snd_ctl_open (&driver->ctl_handle, ctl_name, 0)) < 0) {
-		printf ("control open \"%s\" (%s)", ctl_name,
-			    snd_strerror(err));
+		alsa_printf(driver, "control open \"%s\" (%s)", ctl_name, snd_strerror(err));
 	} else if ((err = snd_ctl_card_info(driver->ctl_handle, card_info)) < 0) {
-		printf ("control hardware info \"%s\" (%s)",
-			    driver->alsa_name_playback, snd_strerror (err));
+		alsa_printf(driver, "control hardware info \"%s\" (%s)", driver->alsa_name_playback, snd_strerror (err));
 		snd_ctl_close (driver->ctl_handle);
 	}
 
@@ -235,26 +311,44 @@ int alsa_driver_new(alsa_driver_t* driver)
 
 #if MMAP_ACCESS_ENABLED == 0
 	if(NULL == (driver->samples = malloc(driver->buffer_size*NCHANNELS*sizeof(int)))) {
-		printf("cannot allocate memory for sample buffer");
-		return 0;
+		alsa_printf(driver, "cannot allocate memory for sample buffer");
+		return ALSA_STATUS_MEMORY_ERROR;
 	}
 #endif
 
-	if ((err = open_stream(driver, &driver->playback_handle, driver->alsa_name_playback, SND_PCM_STREAM_PLAYBACK)) < 0)
-		return 0;
-	printf("Playback opened\n");
+	if (ALSA_STATUS_OK != (status = open_stream(driver, &driver->playback_handle, driver->alsa_name_playback, SND_PCM_STREAM_PLAYBACK)))
+		return status;
+
+	alsa_printf(driver, "Playback opened\n");
 
 #if CAPTURE_ENABLED
-	if ((err = open_stream(driver, &driver->capture_handle, driver->alsa_name_capture, SND_PCM_STREAM_CAPTURE)) < 0)
-		return 0;
-	printf("Capture opened\n");
+	if (ALSA_STATUS_OK != (status = open_stream(driver, &driver->capture_handle, driver->alsa_name_capture, SND_PCM_STREAM_CAPTURE)))
+		return status;
+
+	alsa_printf(driver, "Capture opened\n");
+#endif
+
+#if USING_SYSTEM_POLL
+	if (driver->playback_handle) {
+		driver->playback_nfds =
+			snd_pcm_poll_descriptors_count (driver->playback_handle);
+	} else {
+		driver->playback_nfds = 0;
+	}
+
+	if (driver->capture_handle) {
+		driver->capture_nfds = snd_pcm_poll_descriptors_count (driver->capture_handle);
+	} else {
+		driver->capture_nfds = 0;
+	}
+
+	driver->pfd = (struct pollfd *)	malloc (sizeof (struct pollfd) * (driver->playback_nfds + driver->capture_nfds + 2));
 #endif
 
 	driver->capture_and_playback_not_synced = 0;
 
 	if (driver->capture_handle && driver->playback_handle) {
-		if (snd_pcm_link (driver->playback_handle,
-				  driver->capture_handle) != 0) {
+		if (snd_pcm_link (driver->playback_handle, driver->capture_handle) != 0) {
 			driver->capture_and_playback_not_synced = 1;
 		}
 	}
@@ -263,17 +357,17 @@ int alsa_driver_new(alsa_driver_t* driver)
 	driver->polling_timeout = (int) floor (1.5f * period_usecs /1000.0);
 
 	if(driver->use_polling) {
-		printf("polling timeout %d [ms]\n", driver->polling_timeout);
+		alsa_printf(driver, "polling timeout %d [ms]\n", driver->polling_timeout);
 	}
 
 	driver->latency = driver->buffer_size * 1000 / driver->sample_rate;
 
 	if(0 == driver->capture_and_playback_not_synced)
 	{
-		printf("Playback and Capture are synced\n");
+		alsa_printf(driver, "Playback and Capture are synced\n");
 	}
 
-	return 1;
+	return ALSA_STATUS_OK;
 }
 
 #if MMAP_ACCESS_ENABLED
@@ -294,60 +388,39 @@ static int get_channel_address(
 		const snd_pcm_channel_area_t *a = &areas[chn];
 		addr[chn] = (char *) a->addr + ((a->first + a->step * *(offset)) / 8);
 		interleave_skip[chn] = (unsigned long) (a->step / 8);
-		//printf("first %d, step %d\n", a->first, a->step);
 	}
 
 	return 0;
 }
 #endif
 
-int alsa_driver_prepare(alsa_driver_t* driver)
+alsa_status_t alsa_driver_prepare(alsa_driver_t* driver)
 {
 	int err;
 
+	if(!driver) {
+		alsa_printf(driver, "alsa_driver_prepare with NULL pointer");
+		return ALSA_STATUS_NULL_POINTER;
+	}
+
 	if (driver->playback_handle) {
 		if ((err = snd_pcm_prepare (driver->playback_handle)) < 0) {
-			printf ("ALSA: prepare error for playback on "
-				    "\"%s\" (%s)", driver->alsa_name_playback,
-				    snd_strerror(err));
-			return 0;
+			alsa_printf(driver, "ALSA: prepare error for playback on \"%s\" (%s)", driver->alsa_name_playback, snd_strerror(err));
+			return ALSA_STATUS_ERROR;
 		}
 	}
 
-	if ((driver->capture_handle && driver->capture_and_playback_not_synced)
-	    || !driver->playback_handle) {
+	if ((driver->capture_handle && driver->capture_and_playback_not_synced) || !driver->playback_handle) {
 		if ((err = snd_pcm_prepare (driver->capture_handle)) < 0) {
-			printf ("ALSA: prepare error for capture on \"%s\""
-				    " (%s)", driver->alsa_name_capture,
-				    snd_strerror(err));
-			return 0;
+			alsa_printf(driver,"ALSA: prepare error for capture on \"%s\" (%s)", driver->alsa_name_capture, snd_strerror(err));
+			return ALSA_STATUS_ERROR;
 		}
 	}
 
-#if USING_SYSTEM_POLL
-	if (driver->playback_handle) {
-		driver->playback_nfds =
-			snd_pcm_poll_descriptors_count (driver->playback_handle);
-	} else {
-		driver->playback_nfds = 0;
-	}
-
-	if (driver->capture_handle) {
-		driver->capture_nfds =
-			snd_pcm_poll_descriptors_count (driver->capture_handle);
-	} else {
-		driver->capture_nfds = 0;
-	}
-
-	driver->pfd = (struct pollfd *)
-		malloc (sizeof (struct pollfd) *
-			(driver->playback_nfds + driver->capture_nfds + 2));
-#endif
-
-	return 1;
+	return ALSA_STATUS_OK;
 }
 
-int alsa_driver_start(alsa_driver_t* driver)
+alsa_status_t alsa_driver_start(alsa_driver_t* driver)
 {
 #if MMAP_ACCESS_ENABLED
     char* playback_addr[NCHANNELS];
@@ -356,47 +429,53 @@ int alsa_driver_start(alsa_driver_t* driver)
 	snd_pcm_uframes_t avail;
 	int err;
 
+	if(!driver) {
+		alsa_printf(driver, "alsa_driver_start with NULL pointer");
+		return ALSA_STATUS_NULL_POINTER;
+	}
+
 	avail = snd_pcm_avail_update (driver->playback_handle);
 
 	if (avail != driver->buffer_size) {
-		printf ("ALSA: full buffer not available at start, %u\n", (unsigned int)avail);
-		return -1;
+		alsa_printf(driver, "ALSA: full buffer not available at start, %u", (unsigned int)avail);
+		return ALSA_STATUS_ERROR;
 	}
 #if MMAP_ACCESS_ENABLED
-	if ((err = get_channel_address(
-			driver->playback_handle,
-			&offset, &avail, playback_addr, driver->playback_interleave_skip) < 0)) {
-		printf ("ALSA: %s: mmap areas info error ", driver->alsa_name_playback);
-		return -1;
+	if ((err = get_channel_address( driver->playback_handle, &offset, &avail, playback_addr, driver->playback_interleave_skip) < 0)) {
+		alsa_printf(driver, "ALSA: %s: mmap areas info error ", driver->alsa_name_playback);
+		return ALSA_STATUS_ERROR;
 	}
 
 	if ((err = snd_pcm_mmap_commit (driver->playback_handle, offset, avail)) < 0) {
-		printf ("ALSA: could not complete playback of %u frames: error = %d", (unsigned int)avail, err);
+		alsa_printf(driver, "ALSA: could not complete playback of %u frames: error = %d", (unsigned int)avail, err);
 		if (err != -EPIPE && err != -ESTRPIPE)
-			return -1;
+			return ALSA_STATUS_ERROR;
 	}
 
 	if ((err = snd_pcm_start (driver->playback_handle)) < 0) {
-		fprintf(stderr, "cannot start audio interface for playback (%s)\n",
-			 snd_strerror(err));
-		return 0;
+		alsa_printf(driver, "cannot start audio interface for playback (%s)\n", snd_strerror(err));
+		return ALSA_STATUS_ERROR;
 	}
 #else
 	memset (driver->samples, 0, driver->buffer_size*NCHANNELS*sizeof(int));
 
 	if ((err = snd_pcm_writei(driver->playback_handle, driver->samples, avail)) < 0) {
-		printf ("write failed %s\n", snd_strerror (err));
-		exit (1);
+		alsa_printf(driver, "write failed %s", snd_strerror (err));
+		return ALSA_STATUS_ERROR;
 	}
 #endif
-	return 1;
+	return ALSA_STATUS_OK;
 }
 
-int alsa_driver_wait(alsa_driver_t* driver)
+alsa_status_t alsa_driver_wait(alsa_driver_t* driver, int* polling_time)
 {
-	if(!driver->use_polling) return 0;
+	if(!driver) {
+		alsa_printf(driver, "alsa_driver_wait with NULL pointer");
+		return ALSA_STATUS_NULL_POINTER;
+	}
 
-	int ret;
+	if(!driver->use_polling)
+		return ALSA_STATUS_OK;
 
 #if USING_SYSTEM_POLL
 	int i;
@@ -406,16 +485,12 @@ int alsa_driver_wait(alsa_driver_t* driver)
 	uint64_t poll_start, poll_end;
 
 	if (driver->playback_handle) {
-		snd_pcm_poll_descriptors (driver->playback_handle,
-					  &driver->pfd[0],
-					  driver->playback_nfds);
+		snd_pcm_poll_descriptors (driver->playback_handle, &driver->pfd[0], driver->playback_nfds);
 		nfds += driver->playback_nfds;
 	}
 
 	if (driver->capture_handle) {
-		snd_pcm_poll_descriptors (driver->capture_handle,
-					  &driver->pfd[nfds],
-					  driver->capture_nfds);
+		snd_pcm_poll_descriptors (driver->capture_handle, &driver->pfd[nfds], driver->capture_nfds);
 		ci = nfds;
 		nfds += driver->capture_nfds;
 	}
@@ -432,67 +507,70 @@ int alsa_driver_wait(alsa_driver_t* driver)
 	if (poll_result < 0) {
 
 		if (errno == EINTR) {
-			printf ("poll interrupt");
-			return 0;
+			alsa_printf(driver, "poll interrupt");
+			return ALSA_STATUS_ERROR;
 		}
 
-		printf ("ALSA: poll call failed (%s)", strerror (errno));
-		return 0;
+		alsa_printf(driver, "ALSA: poll call failed (%s)", strerror (errno));
+		return ALSA_STATUS_ERROR;
 	}
 
 	poll_end = alsa_get_microseconds();
-	ret = (int)((poll_end - poll_start) / 1000);
+
+	if(polling_time) {
+		*polling_time = (int)((poll_end - poll_start) / 1000);
+	}
 
 	unsigned short revents;
 
 	if (driver->playback_handle)
 	{
-		if (snd_pcm_poll_descriptors_revents
-		    (driver->playback_handle, &driver->pfd[0],
-		     driver->playback_nfds, &revents) < 0)
-		{
-			printf ("ALSA: playback revents failed\n");
-			return 0;
+		if (snd_pcm_poll_descriptors_revents(driver->playback_handle, &driver->pfd[0], driver->playback_nfds, &revents) < 0) {
+			alsa_printf(driver, "ALSA: playback revents failed");
+			return ALSA_STATUS_ERROR;
 		}
 
-		if (revents & POLLERR)
-		{
-			printf ("playback xrun\n");
+		if (revents & POLLERR)	{
+			alsa_printf(driver, "playback xrun");
 		}
 	}
 
 	if (driver->capture_handle)
 	{
-		if (snd_pcm_poll_descriptors_revents
-		    (driver->capture_handle, &driver->pfd[ci],
-		     driver->capture_nfds, &revents) < 0) {
-			printf ("ALSA: capture revents failed\n");
-			return 0;
+		if (snd_pcm_poll_descriptors_revents(driver->capture_handle, &driver->pfd[ci], driver->capture_nfds, &revents) < 0) {
+			alsa_printf(driver, "ALSA: capture revents failed");
+			return ALSA_STATUS_ERROR;
 		}
 
-		if (revents & POLLERR)
-		{
+		if (revents & POLLERR) {
 			printf ("capture xrun\n");
 		}
 	}
 #else
-	if ((ret = snd_pcm_wait (driver->playback_handle, driver->polling_timeout)) == 0) {
-			printf ("PCM wait failed, driver timeout\n");
+	int ret;
+	if (0 == (ret = snd_pcm_wait (driver->playback_handle, driver->polling_timeout))) {
+		alsa_printf(driver, "PCM wait failed, driver timeout\n");
+		return ALSA_STATUS_WARNING;
+	}
+	if(polling_time) {
+		*polling_time = ret;
 	}
 #endif
-	return ret;
+
+	return ALSA_STATUS_OK;
 }
 
-int alsa_driver_write(alsa_driver_t* driver, process_t process)
+alsa_status_t alsa_driver_write_prepare(alsa_driver_t* driver, int** addr, int* size)
 {
 #if MMAP_ACCESS_ENABLED
 	snd_pcm_uframes_t offset;
 #endif
 	snd_pcm_uframes_t avail;
-	int ret;
-	int err;
 
-	ret = 0;
+	if(!driver) {
+		alsa_printf(driver, "alsa_driver_write with NULL pointer");
+		return ALSA_STATUS_NULL_POINTER;
+	}
 
 	if(driver->playback_handle)
 	{
@@ -506,37 +584,60 @@ int alsa_driver_write(alsa_driver_t* driver, process_t process)
 			if ((err = get_channel_address(
 					driver->playback_handle,
 					&offset, &avail, (char**)driver->playback_addr, driver->playback_interleave_skip) < 0)) {
-				printf ("ALSA: %s: mmap areas info error ", driver->alsa_name_playback);
-				return -1;
+				alsa_printf(driver, "ALSA: %s: mmap areas info error ", driver->alsa_name_playback);
+				return ALSA_STATUS_ERROR;
 			}
-
-			process(driver->capture_addr, driver->playback_addr, avail);
-
-			if ((err = snd_pcm_mmap_commit (driver->playback_handle, offset, avail)) < 0) {
-				printf ("ALSA: could not complete playback of %u frames: error = %d", (unsigned int)avail, err);
-				if (err != -EPIPE && err != -ESTRPIPE)
-					return -1;
-			}
+			*addr = driver->playback_addr;
 #else
-			process(driver->samples, driver->samples, avail);
-
-			if ((err = snd_pcm_writei(driver->playback_handle, driver->samples, avail)) < 0) {
-				printf ("write failed %s\n", snd_strerror (err));
-				exit(1);
-			}
+			*addr = driver->samples;
 #endif
-
-			ret = avail;
-
-		} else {
-				//printf ("nothing to write\n");
+			*size = avail;
 		}
 	}
 
-	return ret;
+	return ALSA_STATUS_OK;
 }
 
-int alsa_driver_read(alsa_driver_t* driver)
+alsa_status_t alsa_driver_write(alsa_driver_t* driver)
+{
+#if MMAP_ACCESS_ENABLED
+	snd_pcm_uframes_t offset;
+#endif
+	snd_pcm_uframes_t avail;
+	int err;
+
+	if(!driver) {
+		alsa_printf(driver, "alsa_driver_write with NULL pointer");
+		return ALSA_STATUS_NULL_POINTER;
+	}
+
+	if(driver->playback_handle)
+	{
+		avail = snd_pcm_avail_update(driver->playback_handle);
+		if (avail >= driver->avail_min)
+		{
+			if (avail > driver->buffer_size)
+				avail = driver->buffer_size;
+
+#if MMAP_ACCESS_ENABLED
+			if ((err = snd_pcm_mmap_commit (driver->playback_handle, offset, avail)) < 0) {
+				alsa_printf(driver, "ALSA: could not complete playback of %u frames: error = %d", (unsigned int)avail, err);
+				if (err != -EPIPE && err != -ESTRPIPE)
+					return ALSA_STATUS_ERROR;
+			}
+#else
+			if ((err = snd_pcm_writei(driver->playback_handle, driver->samples, avail)) < 0) {
+				alsa_printf(driver, "write failed %s", snd_strerror (err));
+				return ALSA_STATUS_ERROR;
+			}
+#endif
+		}
+	}
+
+	return ALSA_STATUS_OK;
+}
+
+alsa_status_t alsa_driver_read(alsa_driver_t* driver)
 {
 #if MMAP_ACCESS_ENABLED
 	snd_pcm_uframes_t offset;
@@ -545,9 +646,11 @@ int alsa_driver_read(alsa_driver_t* driver)
 	int actual;
 #endif
 	snd_pcm_uframes_t avail;
-	int ret;
 
-	ret = 0;
+	if(!driver) {
+		alsa_printf(driver, "alsa_driver_read with NULL pointer");
+		return ALSA_STATUS_NULL_POINTER;
+	}
 
 	if (driver->capture_handle)
 	{
@@ -561,34 +664,32 @@ int alsa_driver_read(alsa_driver_t* driver)
 			if ((err = get_channel_address(
 					driver->capture_handle,
 					&offset, &avail, (char**)driver->capture_addr, driver->capture_interleave_skip) < 0)) {
-				printf ("ALSA: %s: mmap areas info error ", driver->alsa_name_capture);
-				return -1;
+				alsa_printf(driver, "ALSA: %s: mmap areas info error", driver->alsa_name_capture);
+				return ALSA_STATUS_ERROR;
 			}
 
 			if ((err = snd_pcm_mmap_commit (driver->capture_handle, offset, avail)) < 0) {
-				printf ("ALSA: could not complete read of %u frames: error = %d", (unsigned int)avail, err);
-				return -1;
+				alsa_printf(driver, "ALSA: could not complete read of %u frames: error = %d", (unsigned int)avail, err);
+				return ALSA_STATUS_ERROR;
 			}
 #else
 			if ((actual = snd_pcm_readi(driver->capture_handle, driver->samples, avail)) < 0) {
-				printf ("read failed %s\n", snd_strerror (actual));
-				exit(1);
+				alsa_printf(driver, "read failed %s", snd_strerror (actual));
+				return ALSA_STATUS_ERROR;
 			}
 #endif
-			ret = avail;
-
 		} else {
-				//printf ("nothing to read\n");
+			//printf ("nothing to read\n");
 		}
 	}
 
-	return ret;
+	return ALSA_STATUS_OK;
 }
 
-int alsa_driver_get_options(alsa_driver_t* driver, int argc, char *argv[])
+alsa_status_t alsa_driver_get_options(alsa_driver_t* driver, int argc, char *argv[])
 {
 	int needhelp = 0;
-	struct option long_option[] =
+	const struct option long_option[] =
 	{
 		{"help", no_argument, NULL, 'h'},
 		{"pdevice", required_argument, NULL, 'P'},
@@ -602,6 +703,13 @@ int alsa_driver_get_options(alsa_driver_t* driver, int argc, char *argv[])
 
 	int err;
 	int c;
+
+	if(!driver) {
+		alsa_printf(driver, "alsa_driver_get_options with NULL pointer");
+		return ALSA_STATUS_NULL_POINTER;
+	}
+
+	driver->puts = default_alsa_puts;
 
 	driver->sample_rate = DEFAULT_SAMPLERATE;
 	driver->use_polling = DEFAULT_POLLING_USAGE;
@@ -643,7 +751,7 @@ int alsa_driver_get_options(alsa_driver_t* driver, int argc, char *argv[])
 	}
 
 	if (needhelp) {
-		printf(
+		alsa_printf(driver,
 				"Usage: aloop [OPTIONS]\n"
 				"-h,--help      this message\n"
 				"-P,--pdevice   playback device (plughw:1,0 by default - good for USB connected devices, try hw:0,0 for others)\n"
@@ -653,10 +761,9 @@ int alsa_driver_get_options(alsa_driver_t* driver, int argc, char *argv[])
 				"-b,--buffer    buffer size in frames (try 2 x period size first)\n"
 				"-w,--wait      1 - wait for event, 0 - do not wait. Wait gives time to another threads - reduces overall CPU usage\n"
 		);
-	    printf("\n\n");
-		return 0;
+		return ALSA_STATUS_ERROR;
 	}
 
-	return 1;
+	return ALSA_STATUS_OK;
 }
 
