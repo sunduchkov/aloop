@@ -18,11 +18,13 @@
 #define MMAP_ACCESS_ENABLED		0
 #define	USING_SYSTEM_POLL		1
 
-#if MMAP_ACCESS_ENABLED
-typedef void (*process_t)(int* pSamplesIn[NCHANNELS], int* pSamplesOut[NCHANNELS], int nLength);
-#else
-typedef void (*process_t)(int* pSamplesIn, int* pSamplesOut, int nLength);
-#endif
+typedef enum {
+	ALSA_STATUS_OK = 0,
+	ALSA_STATUS_NULL_POINTER,
+	ALSA_STATUS_MEMORY_ERROR,
+	ALSA_STATUS_ERROR,
+
+} 	alsa_status_t;
 
 typedef struct _alsa_driver
 {
@@ -59,15 +61,23 @@ typedef struct _alsa_driver
 	int						use_polling;
 	int                    	polling_timeout;
 
+	int 					(*puts)(const char* s);
+
 }	alsa_driver_t;
 
 uint64_t alsa_get_microseconds();
-int alsa_driver_new(alsa_driver_t* driver);
-int alsa_driver_prepare(alsa_driver_t* driver);
-int alsa_driver_start(alsa_driver_t* driver);
-int alsa_driver_wait(alsa_driver_t* driver);
-int alsa_driver_read(alsa_driver_t* driver);
-int alsa_driver_write(alsa_driver_t* driver, process_t process);
-int alsa_driver_get_options(alsa_driver_t* driver, int argc, char *argv[]);
+
+alsa_status_t alsa_driver_get_options(alsa_driver_t* driver, int argc, char *argv[]);
+
+alsa_status_t alsa_driver_open(alsa_driver_t* driver);
+alsa_status_t alsa_driver_close(alsa_driver_t* driver);
+
+alsa_status_t alsa_driver_prepare(alsa_driver_t* driver);
+alsa_status_t alsa_driver_start(alsa_driver_t* driver);
+
+alsa_status_t alsa_driver_wait(alsa_driver_t* driver, int* polling_time);
+alsa_status_t alsa_driver_read(alsa_driver_t* driver);
+alsa_status_t alsa_driver_write_prepare(alsa_driver_t* driver, int** addr, int* size);
+alsa_status_t alsa_driver_write(alsa_driver_t* driver);
 
 #endif // __ALSA_DRIVER_H__
