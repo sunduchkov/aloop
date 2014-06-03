@@ -16,6 +16,11 @@ int getparams_connect(getparams_t* p)
 {
 	int connection;
 
+	if(!p) {
+		printf("getparams_connect: null pointer\n");
+		return 0;
+	}
+
 	if(-1 == (connection = accept(p->sockfd, NULL, NULL))) {
 		return 0;
 	}
@@ -44,6 +49,11 @@ int getparams_get(getparams_t* p)
 	char* ptr;
 	int size;
 
+	if(!p) {
+		printf("getparams_get: null pointer\n");
+		return 0;
+	}
+
 	if(!p->connection) {
 		return 0;
 	}
@@ -68,7 +78,12 @@ int getparams_get(getparams_t* p)
 
 int getparams_start(getparams_t* p)
 {
-	if(-1 == (p->sockfd = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP))) {
+	if(!p) {
+		printf("getparams_start: null pointer\n");
+		return 0;
+	}
+
+	if(-1 == (p->sockfd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP))) {
 		printf("getparams_start: (%s)\n", strerror(errno));
 		return 0;
 	}
@@ -121,6 +136,11 @@ int getparams_start(getparams_t* p)
 
 int getparams_stop(getparams_t* p)
 {
+	if(!p) {
+		printf("getparams_stop: null pointer\n");
+		return 0;
+	}
+
 	if(p->connection) {
 		if(-1 == (close(p->connection))) {
 			printf("getparams_stop:connection (%s)\n", strerror(errno));
