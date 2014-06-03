@@ -10,14 +10,17 @@
 #include <pthread.h>
 
 #include "getparams.h"
+#include "sendstates.h"
 #include "alsa_driver.h"
 
-#define REALTIMEAUDIO_ENABLED	1
+#define REALTIMEAUDIO_ENABLED	0
+#define NETWORKING_ENABLED		1
 
 typedef struct
 {
 	alsa_driver_t 	driver;
-	getparams_t		params;
+	getparams_t		getparams;
+	sendstates_t	sendstates;
 	int				loop;
 
 	int 			gain;
@@ -41,6 +44,7 @@ void setscheduler(void)
 	printf("!!!Scheduler set with priority %i FAILED!!!\n", sched_param.sched_priority);
 }
 
+#if REALTIMEAUDIO_ENABLED
 #if MMAP_ACCESS_ENABLED
 static void ProcessStereo(int* samplesIn[2], int* samplesOut[2], int N)
 {
@@ -150,6 +154,7 @@ static void* realtime_audio(void* p)
 
 	return NULL;
 }
+#endif
 
 const char* pthread_err(int err)
 {
@@ -187,10 +192,10 @@ int main(int argc, char *argv[])
 {
 	aadsp_t aadsp;
 	alsa_driver_t* driver = &aadsp.driver;
-	int err;
 
-	printf("ALSA Path-through starting\n");
+	printf("ALSA Path-through starting...\n");
 
+#if REALTIMEAUDIO_ENABLED
 	if(ALSA_STATUS_OK != alsa_driver_get_options(&aadsp.driver, argc, argv)) {
 		exit(1);
 	}
@@ -202,9 +207,9 @@ int main(int argc, char *argv[])
 
 	printf("Audio Interface \"%s\" initialized with %d [ms] latency\n", driver->alsa_driver_name, driver->latency);
 
-#if REALTIMEAUDIO_ENABLED
 	pthread_t thread;
 	pthread_attr_t attr;
+	int err;
 
 	if(0 != (err = pthread_attr_init(&attr))) {
 		printf("pthread_attr_init: error (%s)\n", pthread_err(err));
@@ -234,28 +239,41 @@ int main(int argc, char *argv[])
 	}
 #endif
 
-	if(!getparams_start(&aadsp.params)) {
+#if NETWORKING_ENABLED
+	if(!getparams_start(&aadsp.getparams)) {
 		exit(1);
 	}
 
-	printf("Waiting for connection...\n");
+	if(!sendstates_start(&aadsp.sendstates)) {
+		exit(1);
+	}
+
+	printf("Networking started\n");
+#endif
 
 	while(1) {
-		if(getparams_connect(&aadsp.params)) {
+#if NETWORKING_ENABLED
+		sendstates_send(&aadsp.sendstates, &aadsp.gain, sizeof(aadsp.gain));
+
+		if(getparams_connect(&aadsp.getparams)) {
 			printf("Incoming connection accepted\n");
 		}
 
-		if(getparams_get(&aadsp.params)) {
-			printf("%d %f\n", aadsp.params.nNumber, aadsp.params.fValue);
+		if(getparams_get(&aadsp.getparams)) {
+			printf("%d %f\n", aadsp.getparams.nNumber, aadsp.getparams.fValue);
 
-			if(7 == aadsp.params.nNumber) {
-				aadsp.gain = (int)((int64_t)0x7fffffff * aadsp.params.fValue / 100);
+			if(7 == aadsp.getparams.nNumber) {
+				aadsp.gain = (int)((int64_t)0x7fffffff * aadsp.getparams.fValue / 100);
 				printf("%x\n", aadsp.gain);
 			}
 		}
+
+		sleep(0);
+#endif
 	}
 
-	getparams_stop(&aadsp.params);
+	getparams_stop(&aadsp.getparams);
+	sendstates_stop(&aadsp.sendstates);
 
 #if REALTIMEAUDIO_ENABLED
 	if(0 != pthread_join(thread, NULL)) {
