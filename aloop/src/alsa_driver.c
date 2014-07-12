@@ -29,8 +29,8 @@
 #define DEFAULT_SAMPLERATE		48000
 #define DEFAULT_PERIOD_SIZE		96						// frames number between PCM interrupts (2 ms)
 #define DEFAULT_BUFFER_SIZE		(2*DEFAULT_PERIOD_SIZE)	// ring buffer in frames. should be at least 2 periods
-#define DEFAULT_PLAYBACK_DEVICE	"plughw:1,0"
-#define DEFAULT_CAPTURE_DEVICE	"plughw:1,0"
+#define DEFAULT_PLAYBACK_DEVICE	"plughw:0,0"
+#define DEFAULT_CAPTURE_DEVICE	"plughw:0,0"
 #define DEFAULT_POLLING_USAGE	1
 
 void alsa_printf(alsa_driver_t* driver, const char *fmt, ...)

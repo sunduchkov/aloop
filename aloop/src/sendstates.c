@@ -4,6 +4,7 @@
 
 #include <fcntl.h>
 #include <sys/socket.h>
+#include <sys/types.h>
 #include <netinet/in.h>
 #include <unistd.h>
 #include <errno.h>
@@ -12,7 +13,7 @@
 
 #include "sendstates.h"
 
-int sendstates_start(sendstates_t* p)
+int sendstates_start(sendstates_t* p, char* network_interface)
 {
 	if(!p) {
 		printf("sendstates_start: null pointer\n");
@@ -24,10 +25,23 @@ int sendstates_start(sendstates_t* p)
 		return 0;
 	}
 
+#if 1 // enable broadcast
 	int broadcastEnable=1;
 	if(-1 == setsockopt(p->sockfd, SOL_SOCKET, SO_BROADCAST, &broadcastEnable, sizeof(broadcastEnable))) {
 		printf("sendstates_start:setsockopt (%s)\n", strerror(errno));
 		return 0;
+	}
+#endif
+
+	if(network_interface) {
+		if(-1 == (setsockopt(p->sockfd, SOL_SOCKET,  SO_BINDTODEVICE, network_interface, strlen(network_interface)))) {
+			printf("setsockopt:SO_BINDTODEVICE (%s)\n", strerror(errno));
+			if (errno == EPERM)
+				printf("You must obtain superuser privileges to bind a socket to device\n");
+	        else
+	        	printf("Cannot bind socket to device\n");
+			return 0;
+		}
 	}
 
 	struct sockaddr_in addr;
@@ -44,6 +58,7 @@ int sendstates_start(sendstates_t* p)
 	p->servaddr.sin_family = AF_INET;
 	p->servaddr.sin_port = htons(SENDSTATES_PORT);
 	p->servaddr.sin_addr.s_addr = htonl(INADDR_BROADCAST);
+//	p->servaddr.sin_addr.s_addr = inet_addr(SENDSTATES_GROUP); // multi-cast
 
 	return 1;
 }

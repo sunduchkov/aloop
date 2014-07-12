@@ -8,6 +8,7 @@
 #include <sched.h>
 #include <inttypes.h>
 #include <pthread.h>
+#include <getopt.h>
 
 #include "getparams.h"
 #include "sendstates.h"
@@ -22,6 +23,7 @@ typedef struct
 	getparams_t		getparams;
 	sendstates_t	sendstates;
 	int				loop;
+	char*			network_interface;
 
 	int 			gain;
 
@@ -188,6 +190,49 @@ const char* pthread_err(int err)
 	return str;
 }
 
+static int main_get_options(aadsp_t* aadsp, int argc, char *argv[])
+{
+	int needhelp = 0;
+	const struct option long_option[] =
+	{
+		{"help", no_argument, NULL, 'h'},
+		{"network", required_argument, NULL, 'N'},
+		{NULL, 0, NULL, 0},
+	};
+
+	//int err;
+	int c;
+
+	if(!aadsp) {
+		printf("main_get_options with NULL pointer");
+		return 0;
+	}
+
+	aadsp->network_interface = strdup("eth0");
+
+	while ((c = getopt_long(argc, argv, "hN:", long_option, NULL)) != -1) {
+		switch (c) {
+		case 'h':
+			needhelp = 1;
+			break;
+		case 'N':
+			aadsp->network_interface = strdup(optarg);
+			break;
+		}
+	}
+
+	if (needhelp) {
+		printf(
+				"Usage: aloop [OPTIONS]\n"
+				"-h,--help      this message\n"
+				"-N,--network   network interface (eth0, wlan0, etc)\n"
+		);
+		return 0;
+	}
+
+	return 1;
+}
+
 int main(int argc, char *argv[])
 {
 	aadsp_t aadsp;
@@ -240,11 +285,17 @@ int main(int argc, char *argv[])
 #endif
 
 #if NETWORKING_ENABLED
-	if(!getparams_start(&aadsp.getparams)) {
+	if(!main_get_options(&aadsp, argc, argv)) {
 		exit(1);
 	}
 
-	if(!sendstates_start(&aadsp.sendstates)) {
+	printf("%s\n", aadsp.network_interface);
+
+	if(!getparams_start(&aadsp.getparams, aadsp.network_interface)) {
+		exit(1);
+	}
+
+	if(!sendstates_start(&aadsp.sendstates, aadsp.network_interface)) {
 		exit(1);
 	}
 
@@ -253,6 +304,9 @@ int main(int argc, char *argv[])
 
 	while(1) {
 #if NETWORKING_ENABLED
+
+		aadsp.gain = abs(rand());
+
 		sendstates_send(&aadsp.sendstates, &aadsp.gain, sizeof(aadsp.gain));
 
 		if(getparams_connect(&aadsp.getparams)) {

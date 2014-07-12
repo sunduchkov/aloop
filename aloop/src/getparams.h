@@ -18,7 +18,7 @@ typedef struct
 
 }	getparams_t;
 
-int getparams_start(getparams_t* p);
+int getparams_start(getparams_t* p, char* network_interface);
 int getparams_connect(getparams_t* p);
 int getparams_get(getparams_t* p);
 int getparams_stop(getparams_t* p);

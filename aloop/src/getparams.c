@@ -76,7 +76,7 @@ int getparams_get(getparams_t* p)
 	return 1;
 }
 
-int getparams_start(getparams_t* p)
+int getparams_start(getparams_t* p, char* network_interface)
 {
 	if(!p) {
 		printf("getparams_start: null pointer\n");
@@ -91,8 +91,19 @@ int getparams_start(getparams_t* p)
 	int optval;
 
 	if(-1 == (setsockopt(p->sockfd, SOL_SOCKET,  SO_REUSEADDR, (char *)&optval, sizeof(optval)))) {
-		printf("setsockopt: (%s)\n", strerror(errno));
+		printf("setsockopt:SO_REUSEADDR (%s)\n", strerror(errno));
 		return 0;
+	}
+
+	if(network_interface) {
+		if(-1 == (setsockopt(p->sockfd, SOL_SOCKET,  SO_BINDTODEVICE, network_interface, strlen(network_interface)))) {
+			printf("setsockopt:SO_BINDTODEVICE (%s)\n", strerror(errno));
+			if (errno == EPERM)
+				printf("You must obtain superuser privileges to bind a socket to device\n");
+	        else
+	        	printf("Cannot bind socket to device\n");
+			return 0;
+		}
 	}
 
 #if 0
