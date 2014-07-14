@@ -10,12 +10,16 @@
 #include <pthread.h>
 #include <getopt.h>
 
+#include "amplifier.h"
 #include "getparams.h"
 #include "sendstates.h"
 #include "alsa_driver.h"
 
 #define REALTIMEAUDIO_ENABLED	0
 #define NETWORKING_ENABLED		1
+
+#define AMPLIFIERSTATE_TAG 'DEMO'
+#define AMPLIFIERSTATE_REVISION 0x00010001
 
 typedef struct
 {
@@ -25,7 +29,12 @@ typedef struct
 	int				loop;
 	char*			network_interface;
 
-	int 			gain;
+	AmplifierTopology_t     mAmplifierTopology;
+	AmplifierCoefficients_t mAmplifierCoefficients;
+	AmplifierPacket_t       mAmplifierPacket;
+	//AmplifierState_t        mAmplifierState;
+
+	//int 			gain;
 
 }	aadsp_t;
 
@@ -284,6 +293,12 @@ int main(int argc, char *argv[])
 	}
 #endif
 
+	AmplifierInit(&aadsp.mAmplifierTopology, &aadsp.mAmplifierCoefficients, &aadsp.mAmplifierPacket.mState);
+	aadsp.mAmplifierPacket.mHeader.mTag = AMPLIFIERSTATE_TAG;
+	aadsp.mAmplifierPacket.mHeader.mRevision = AMPLIFIERSTATE_REVISION;
+	aadsp.mAmplifierPacket.mHeader.mId = 1;
+	aadsp.mAmplifierPacket.mHeader.mLength = sizeof(AmplifierState_t);
+
 #if NETWORKING_ENABLED
 	if(!main_get_options(&aadsp, argc, argv)) {
 		exit(1);
@@ -305,9 +320,9 @@ int main(int argc, char *argv[])
 	while(1) {
 #if NETWORKING_ENABLED
 
-		aadsp.gain = abs(rand());
+		AmplifierProcess(&aadsp.mAmplifierTopology, &aadsp.mAmplifierCoefficients, &aadsp.mAmplifierPacket.mState, NULL, NULL, 0);
 
-		sendstates_send(&aadsp.sendstates, &aadsp.gain, sizeof(aadsp.gain));
+		sendstates_send(&aadsp.sendstates, &aadsp.mAmplifierPacket, sizeof(aadsp.mAmplifierPacket));
 
 		if(getparams_connect(&aadsp.getparams)) {
 			printf("Incoming connection accepted\n");
@@ -315,11 +330,12 @@ int main(int argc, char *argv[])
 
 		if(getparams_get(&aadsp.getparams)) {
 			printf("%d %f\n", aadsp.getparams.nNumber, aadsp.getparams.fValue);
-
+/*
 			if(7 == aadsp.getparams.nNumber) {
 				aadsp.gain = (int)((int64_t)0x7fffffff * aadsp.getparams.fValue / 100);
 				printf("%x\n", aadsp.gain);
 			}
+*/
 		}
 
 		sleep(0);

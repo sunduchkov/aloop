@@ -8,6 +8,7 @@
 #define SENDSTATES_PORT 	6666
 #define SENDSTATES_GROUP	"225.0.0.100"
 
+#include <stdint.h>
 #include <netinet/in.h>
 
 typedef struct
