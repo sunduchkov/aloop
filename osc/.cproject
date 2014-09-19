@@ -14,7 +14,7 @@
 				</extensions>
 			</storageModule>
 			<storageModule moduleId="cdtBuildSystem" version="4.0.0">
-				<configuration artifactName="${ProjName}" buildArtefactType="org.eclipse.cdt.build.core.buildArtefactType.exe" buildProperties="org.eclipse.cdt.build.core.buildType=org.eclipse.cdt.build.core.buildType.debug,org.eclipse.cdt.build.core.buildArtefactType=org.eclipse.cdt.build.core.buildArtefactType.exe" cleanCommand="rm -rf" description="" id="cdt.managedbuild.config.gnu.cross.exe.debug.708834959" name="Debug" parent="cdt.managedbuild.config.gnu.cross.exe.debug">
+				<configuration artifactName="${ProjName}" buildArtefactType="org.eclipse.cdt.build.core.buildArtefactType.exe" buildProperties="org.eclipse.cdt.build.core.buildType=org.eclipse.cdt.build.core.buildType.debug,org.eclipse.cdt.build.core.buildArtefactType=org.eclipse.cdt.build.core.buildArtefactType.exe" cleanCommand="rm -rf" description="" id="cdt.managedbuild.config.gnu.cross.exe.debug.708834959" name="Debug" parent="cdt.managedbuild.config.gnu.cross.exe.debug" preannouncebuildStep="" prebuildStep="">
 					<folderInfo id="cdt.managedbuild.config.gnu.cross.exe.debug.708834959." name="/" resourcePath="">
 						<toolChain id="cdt.managedbuild.toolchain.gnu.cross.exe.debug.470154515" name="Cross GCC" superClass="cdt.managedbuild.toolchain.gnu.cross.exe.debug">
 							<option id="cdt.managedbuild.option.gnu.cross.prefix.208900821" name="Prefix" superClass="cdt.managedbuild.option.gnu.cross.prefix" value="arm-linux-gnueabihf-" valueType="string"/>
@@ -41,7 +41,7 @@
 									<listOptionValue builtIn="false" value="/opt/qt/include/QtCore"/>
 									<listOptionValue builtIn="false" value="/opt/qt/include/QtGui"/>
 								</option>
-								<option id="gnu.cpp.compiler.option.other.other.1375215879" name="Other flags" superClass="gnu.cpp.compiler.option.other.other" value="-v -c -fmessage-length=0 -march=armv7-a -mcpu=cortex-a8 -mfpu=neon -mfloat-abi=hard " valueType="string"/>
+								<option id="gnu.cpp.compiler.option.other.other.1375215879" name="Other flags" superClass="gnu.cpp.compiler.option.other.other" value="-c -fmessage-length=0 -march=armv7-a -mcpu=cortex-a8 -mfpu=neon -mfloat-abi=hard " valueType="string"/>
 								<option id="gnu.cpp.compiler.option.other.pic.1690699856" name="Position Independent Code (-fPIC)" superClass="gnu.cpp.compiler.option.other.pic" value="true" valueType="boolean"/>
 								<inputType id="cdt.managedbuild.tool.gnu.cpp.compiler.input.516282571" superClass="cdt.managedbuild.tool.gnu.cpp.compiler.input"/>
 							</tool>
@@ -61,7 +61,7 @@
 									<listOptionValue builtIn="false" value="/usr/arm-linux-gnueabihf/lib"/>
 									<listOptionValue builtIn="false" value="/opt/qt/lib"/>
 								</option>
-								<option id="gnu.cpp.link.option.flags.1090017463" name="Linker flags" superClass="gnu.cpp.link.option.flags" value="-v" valueType="string"/>
+								<option id="gnu.cpp.link.option.flags.1090017463" name="Linker flags" superClass="gnu.cpp.link.option.flags" value="" valueType="string"/>
 								<inputType id="cdt.managedbuild.tool.gnu.cpp.linker.input.1001424581" superClass="cdt.managedbuild.tool.gnu.cpp.linker.input">
 									<additionalInput kind="additionalinputdependency" paths="$(USER_OBJS)"/>
 									<additionalInput kind="additionalinput" paths="$(LIBS)"/>

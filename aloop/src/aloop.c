@@ -1,171 +1,135 @@
 /*
- *	Audio path-through
+ * Simple ALSA path-through program
+ *
+ * Based on article "Introduction to Sound Programming with ALSA" By Jeff Tranter
+ *
+ * http://www.linuxjournal.com/article/6735
+ *
+ * Combined capture/playback and added non-blocking mode
+ *
+ * Thanks to Paul Devis for introduction to ALSA
+ *
+ * author: Artem Sunduchkov
  *
  */
 
-#include <unistd.h>
-#include <stdio.h>
-#include <sched.h>
-#include <inttypes.h>
+/* Use the newer ALSA API */
+#define ALSA_PCM_NEW_HW_PARAMS_API
+
 #include <pthread.h>
-#include <getopt.h>
-
-#include "amplifier.h"
-#include "getparams.h"
-#include "sendstates.h"
-#include "alsa_driver.h"
-
-#define REALTIMEAUDIO_ENABLED	0
-#define NETWORKING_ENABLED		1
-
-#define AMPLIFIERSTATE_TAG 'DEMO'
-#define AMPLIFIERSTATE_REVISION 0x00010001
+#include <signal.h>
+#include <inttypes.h>
+#include <alsa/asoundlib.h>
 
 typedef struct
 {
-	alsa_driver_t 	driver;
-	getparams_t		getparams;
-	sendstates_t	sendstates;
-	int				loop;
-	char*			network_interface;
+	int* buffer;
+	int  frames;
+	int  active;
+	snd_pcm_t *handle_playback;
+	snd_pcm_t *handle_capture;
+	pthread_t realtime_audio_thread;
 
-	AmplifierTopology_t     mAmplifierTopology;
-	AmplifierCoefficients_t mAmplifierCoefficients;
-	AmplifierPacket_t       mAmplifierPacket;
-	//AmplifierState_t        mAmplifierState;
+}	Audio_t;
 
-	//int 			gain;
+static Audio_t Audio;
 
-}	aadsp_t;
-
-void setscheduler(void)
-{
-	struct sched_param sched_param;
-
-	if (sched_getparam(0, &sched_param) < 0) {
-		printf("Scheduler getparam failed...\n");
-		return;
-	}
-	sched_param.sched_priority = sched_get_priority_max(SCHED_FIFO) - 10;
-	if (!sched_setscheduler(0, SCHED_FIFO, &sched_param)) {
-		printf("Scheduler set with priority %i...\n", sched_param.sched_priority);
-		fflush(stdout);
-		return;
-	}
-	printf("!!!Scheduler set with priority %i FAILED!!!\n", sched_param.sched_priority);
-}
-
-#if REALTIMEAUDIO_ENABLED
-#if MMAP_ACCESS_ENABLED
-static void ProcessStereo(int* samplesIn[2], int* samplesOut[2], int N)
+void process_audio(int* samples, int n)
 {
 	int i;
 	int L, R;
-	//static int k = 0;
 
-	for(i = 0; i < N; ++i)
+	for(i = 0; i < n; ++i)
 	{
-#if CAPTURE_ENABLED
-		L = samplesIn[0][i];
-		R = samplesIn[1][i];
-#else
-		// Square signal to Left channel
-		if(i & 0x40) L = (1<<30); else L = -(1<<30);
-		R = L;
-#endif
+		L = samples[i*2];
+		R = samples[i*2+1];
 
-		// Spectrum inversion for Right channel
-		//if(i & 1) R = -R;
-
-		samplesOut[0][i] = L;
-		samplesOut[1][i] = R;
+		samples[i*2] = L;
+		samples[i*2+1] = R;
 	}
 }
-#else
-static void ProcessStereo(aadsp_t* p, int* samplesIn, int* samplesOut, int N)
+
+int open_stream(snd_pcm_t** handle, int dir, snd_pcm_uframes_t period)
 {
-	int i;
-	int L, R;
-	int64_t acc;
+	snd_pcm_hw_params_t *params;
+	unsigned int val;
+	int exactness;
+	int rc;
 
-	//static int k = 0;
-	for(i = 0; i < N; ++i)
-	{
-#if CAPTURE_ENABLED
-		L = samplesIn[i*2];
-		R = samplesIn[i*2+1];
-#else
-		// Square signal to Left channel
-		if(i & 0x40) L = (1<<30); else L = -(1<<30);
-		R = L;
-#endif
-
-		// Spectrum inversion for Right channel
-		//if(i & 1) R = -R;
-
-		acc = (int64_t)L * p->gain;
-		L = (int)(acc >> 31);
-		acc = (int64_t)R * p->gain;
-		R = (int)(acc >> 31);
-
-		samplesOut[i*2] = L;
-		samplesOut[i*2+1] = R;
+	/* Open PCM device for capture/playback */
+	if ((rc = snd_pcm_open(handle, "hw:0", dir, SND_PCM_NONBLOCK)) < 0) {
+	    fprintf(stderr, "unable to open pcm device: %s\n", snd_strerror(rc));
+	    return 0;
 	}
-}
-#endif
 
-static void* realtime_audio(void* p)
+	/* Allocate a hardware parameters object. */
+	snd_pcm_hw_params_alloca(&params);
+
+	/* Fill it in with default values. */
+	snd_pcm_hw_params_any(*handle, params);
+
+	/* Set the desired hardware parameters. */
+
+	/* Interleaved mode */
+	snd_pcm_hw_params_set_access(*handle, params, SND_PCM_ACCESS_RW_INTERLEAVED);
+
+	/* Signed 16-bit little-endian format */
+	snd_pcm_hw_params_set_format(*handle, params, SND_PCM_FORMAT_S32_LE);
+
+	/* Two channels (stereo) */
+	snd_pcm_hw_params_set_channels(*handle, params, 2);
+
+	/* 48000 bits/second sampling rate */
+	val = 48000;
+	snd_pcm_hw_params_set_rate_near(*handle, params, &val, &exactness);
+
+	#if 1
+		if ((rc = snd_pcm_hw_params_set_buffer_size(*handle, params, period*128)) < 0) {
+			fprintf(stderr, "cannot set buffer time (%s)", snd_strerror(rc));
+		}
+	#endif
+
+	snd_pcm_hw_params_set_period_size_near(*handle, params, &period, &exactness);
+
+	/* Write the parameters to the driver */
+	if ((rc = snd_pcm_hw_params(*handle, params)) < 0) {
+	    fprintf(stderr, "unable to set hw parameters: %s\n", snd_strerror(rc));
+	    exit(1);
+	}
+
+	return period;
+}
+
+static void* realtime_audio(void* p) // no printf when audio is working please
 {
-	aadsp_t* aadsp = (aadsp_t*)p;
-	alsa_driver_t* driver = &aadsp->driver;
-	int* addr;
-	int size;
+	Audio_t* audio = (Audio_t*)p;
+	int rc;
 
-	while(1)
+	audio->active = 1;
+
+	while(audio->active)
 	{
-		if(ALSA_STATUS_OK != alsa_driver_prepare(driver)) {
-			printf("alsa_driver_prepare not succeeded\n");
-			continue;
-		}
+	    rc = snd_pcm_readi(audio->handle_capture, audio->buffer, audio->frames);
+	    if (rc == -EPIPE)
+	    {
+	        /* EPIPE means overrun */
+	        snd_pcm_prepare(audio->handle_capture);
+	    }
+	    else if(rc > 0)
+	    {
+	    	process_audio(audio->buffer, rc);
 
-		printf("Audio Interface prepared for start\n");
-
-		if(ALSA_STATUS_OK != alsa_driver_start(driver)) {
-			printf("alsa_driver_start not succeeded\n");
-			continue;
-		}
-
-		aadsp->loop = 1;
-
-		aadsp->gain = 0x7fffffff;
-
-		while (aadsp->loop)
-		{
-			if(ALSA_STATUS_OK != alsa_driver_wait(driver, NULL)) {
-				break;
-			}
-
-			if(ALSA_STATUS_OK != alsa_driver_read(driver)) {
-				break;
-			}
-
-			if(ALSA_STATUS_OK != alsa_driver_write_prepare(driver, &addr, &size)) {
-				break;
-			}
-
-			ProcessStereo(aadsp, addr, addr, size);
-
-			if(ALSA_STATUS_OK != alsa_driver_write(driver)) {
-				break;
-			}
-		}
-
-		printf("ALSA restart\n");
+	        rc = snd_pcm_writei(audio->handle_playback, audio->buffer, rc);
+            if (rc == -EPIPE)
+            {
+	            /* EPIPE means underrun */
+            	snd_pcm_prepare(audio->handle_playback);
+            }
+	    }
 	}
 
-	return NULL;
+	return p;
 }
-#endif
 
 const char* pthread_err(int err)
 {
@@ -199,160 +163,127 @@ const char* pthread_err(int err)
 	return str;
 }
 
-static int main_get_options(aadsp_t* aadsp, int argc, char *argv[])
+int start_audio_thread(Audio_t* audio)
 {
-	int needhelp = 0;
-	const struct option long_option[] =
-	{
-		{"help", no_argument, NULL, 'h'},
-		{"network", required_argument, NULL, 'N'},
-		{NULL, 0, NULL, 0},
-	};
+	pthread_attr_t attr;
+	int err;
+	int size;
 
-	//int err;
-	int c;
-
-	if(!aadsp) {
-		printf("main_get_options with NULL pointer");
+	size = audio->frames * 4; /* 2 bytes/sample, 2 channels */
+	if(NULL == (audio->buffer = (int*)malloc(size))) {
+		fprintf(stderr, "start_audio_thread: allocation error\n");
 		return 0;
 	}
 
-	aadsp->network_interface = strdup("eth0");
-
-	while ((c = getopt_long(argc, argv, "hN:", long_option, NULL)) != -1) {
-		switch (c) {
-		case 'h':
-			needhelp = 1;
-			break;
-		case 'N':
-			aadsp->network_interface = strdup(optarg);
-			break;
-		}
+	if(0 != (err = pthread_attr_init(&attr))) {
+		printf("pthread_attr_init: error (%s)\n", pthread_err(err));
+		return 0;
 	}
 
-	if (needhelp) {
-		printf(
-				"Usage: aloop [OPTIONS]\n"
-				"-h,--help      this message\n"
-				"-N,--network   network interface (eth0, wlan0, etc)\n"
-		);
+	if(0 != (err = pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED))) { // PTHREAD_CREATE_JOINABLE
+		printf("pthread_attr_setdetachstate: error (%s)\n", pthread_err(err));
+		return 0;
+	}
+
+	if(0 != (err = pthread_attr_setinheritsched(&attr, PTHREAD_EXPLICIT_SCHED))) {
+		printf("pthread_attr_setinheritsched: error (%s)\n", pthread_err(err));
+		return 0;
+	}
+
+	if(0 != (err = pthread_create(&audio->realtime_audio_thread, &attr, realtime_audio, &Audio))) {
+		printf("pthread_create: error (%s)\n", pthread_err(err));
+		return 0;
+	}
+
+	struct sched_param param;
+	param.sched_priority = sched_get_priority_max(SCHED_FIFO) - 10;
+	if(0 != (err = pthread_setschedparam(audio->realtime_audio_thread, SCHED_FIFO, &param))) {
+		printf("pthread_setschedparam: error (%s)\n", pthread_err(err));
 		return 0;
 	}
 
 	return 1;
 }
 
-int main(int argc, char *argv[])
+void stop_audio(Audio_t* audio)
 {
-	aadsp_t aadsp;
-	alsa_driver_t* driver = &aadsp.driver;
+	audio->active = 0;
 
-	printf("ALSA Path-through starting...\n");
-
-#if REALTIMEAUDIO_ENABLED
-	if(ALSA_STATUS_OK != alsa_driver_get_options(&aadsp.driver, argc, argv)) {
-		exit(1);
-	}
-
-	if(ALSA_STATUS_OK != alsa_driver_open(driver)) {
-		printf("alsa_driver_new not succeeded\n");
-		exit(1);
-	}
-
-	printf("Audio Interface \"%s\" initialized with %d [ms] latency\n", driver->alsa_driver_name, driver->latency);
-
-	pthread_t thread;
-	pthread_attr_t attr;
-	int err;
-
-	if(0 != (err = pthread_attr_init(&attr))) {
-		printf("pthread_attr_init: error (%s)\n", pthread_err(err));
-		exit(1);
-	}
-
-	if(0 != (err = pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED))) {
-		printf("pthread_attr_setdetachstate: error (%s)\n", pthread_err(err));
-		exit(1);
-	}
-
-	if(0 != (err = pthread_attr_setinheritsched(&attr, PTHREAD_EXPLICIT_SCHED))) {
-		printf("pthread_attr_setinheritsched: error (%s)\n", pthread_err(err));
-		exit(1);
-	}
-
-	if(0 != (err = pthread_create(&thread, &attr, realtime_audio, &aadsp)))	{
-		printf("pthread_create: error (%s)\n", pthread_err(err));
-		exit(1);
-	}
-
-	struct sched_param param;
-	param.sched_priority = sched_get_priority_max(SCHED_FIFO) - 10;
-	if(0 != (err = pthread_setschedparam(thread, SCHED_FIFO, &param))) {
-		printf("pthread_setschedparam: error (%s)\n", pthread_err(err));
-		exit(1);
-	}
-#endif
-
-	AmplifierInit(&aadsp.mAmplifierTopology, &aadsp.mAmplifierCoefficients, &aadsp.mAmplifierPacket.mState);
-	aadsp.mAmplifierPacket.mHeader.mTag = AMPLIFIERSTATE_TAG;
-	aadsp.mAmplifierPacket.mHeader.mRevision = AMPLIFIERSTATE_REVISION;
-	aadsp.mAmplifierPacket.mHeader.mId = 1;
-	aadsp.mAmplifierPacket.mHeader.mLength = sizeof(AmplifierState_t);
-
-#if NETWORKING_ENABLED
-	if(!main_get_options(&aadsp, argc, argv)) {
-		exit(1);
-	}
-
-	printf("%s\n", aadsp.network_interface);
-
-	if(!getparams_start(&aadsp.getparams, aadsp.network_interface)) {
-		exit(1);
-	}
-
-	if(!sendstates_start(&aadsp.sendstates, aadsp.network_interface)) {
-		exit(1);
-	}
-
-	printf("Networking started\n");
-#endif
-
-	while(1) {
-#if NETWORKING_ENABLED
-
-		AmplifierProcess(&aadsp.mAmplifierTopology, &aadsp.mAmplifierCoefficients, &aadsp.mAmplifierPacket.mState, NULL, NULL, 0);
-
-		sendstates_send(&aadsp.sendstates, &aadsp.mAmplifierPacket, sizeof(aadsp.mAmplifierPacket));
-
-		if(getparams_connect(&aadsp.getparams)) {
-			printf("Incoming connection accepted\n");
-		}
-
-		if(getparams_get(&aadsp.getparams)) {
-			printf("%d %f\n", aadsp.getparams.nNumber, aadsp.getparams.fValue);
-/*
-			if(7 == aadsp.getparams.nNumber) {
-				aadsp.gain = (int)((int64_t)0x7fffffff * aadsp.getparams.fValue / 100);
-				printf("%x\n", aadsp.gain);
-			}
-*/
-		}
-
+	// wait for thread termination
+	while(0 == pthread_kill(audio->realtime_audio_thread, 0)) {
 		sleep(0);
-#endif
 	}
 
-	getparams_stop(&aadsp.getparams);
-	sendstates_stop(&aadsp.sendstates);
+	printf("finished real-time audio thread\n");
 
-#if REALTIMEAUDIO_ENABLED
-	if(0 != pthread_join(thread, NULL)) {
-		printf("pthread_join: error");
-		exit(1);
+	snd_pcm_drain(audio->handle_playback);
+	snd_pcm_close(audio->handle_playback);
+	snd_pcm_drain(audio->handle_capture);
+	snd_pcm_close(audio->handle_capture);
+
+	free(audio->buffer);
+}
+
+static void safe_exit()
+{
+	stop_audio(&Audio);
+
+	exit(1);
+}
+
+static void signal_handler(int s)
+{
+    printf("\nCaught signal %d\n",s);
+
+    safe_exit();
+}
+
+uint64_t get_microseconds()
+{
+	uint64_t t;
+	struct timespec time;
+
+	clock_gettime(CLOCK_MONOTONIC, &time);
+	t = (uint64_t) time.tv_sec * 1000000 + (uint64_t) time.tv_nsec / 1000;
+	return t;
+}
+
+int main()
+{
+	Audio_t* audio = &Audio;
+	snd_pcm_uframes_t frames;
+	uint64_t t0, t;
+	struct sigaction sigIntHandler;
+
+	sigIntHandler.sa_handler = signal_handler;
+	sigemptyset(&sigIntHandler.sa_mask);
+	sigIntHandler.sa_flags = 0;
+
+	sigaction(SIGINT, &sigIntHandler, NULL);
+	sigaction(SIGTERM, &sigIntHandler, NULL);
+
+	audio->frames = open_stream(&audio->handle_capture, SND_PCM_STREAM_CAPTURE, 32);
+	frames = open_stream(&audio->handle_playback, SND_PCM_STREAM_PLAYBACK, 32);
+
+	if(audio->frames != frames) {
+	    fprintf(stderr, "in/out buffers are different %d != %d ", (int)audio->frames, (int)frames);
+	    exit(1);
 	}
-#endif
 
-	alsa_driver_close(driver);
+	start_audio_thread(audio);
+
+	t0 = get_microseconds();
+
+	while (1)
+	{
+		t = get_microseconds();
+		if(t - t0 > 1000000) {
+			t0 = t;
+			printf(".");
+			fflush(stdout);
+		}
+		sleep(0);
+	}
 
 	return 0;
 }
