@@ -21,6 +21,11 @@
 #include <inttypes.h>
 #include <alsa/asoundlib.h>
 
+#define DEFAULT_SAMPLE_RATE		48000
+#define DEFAULT_PERIOD_SIZE		32				// frames (stereo samples) number between PCM interrupts
+#define DEFAULT_PLAYBACK_DEVICE	"plughw:0,0"
+#define DEFAULT_CAPTURE_DEVICE	"plughw:0,0"
+
 typedef struct
 {
 	int* buffer;
@@ -32,9 +37,10 @@ typedef struct
 
 }	Audio_t;
 
-static Audio_t Audio;
+static Audio_t Audio; // should be global for safe_exit
+static int main_thread_active; // should be global for signal_handler
 
-void process_audio(int* samples, int n)
+static void process_audio(int* samples, int n)
 {
 	int i;
 	int L, R;
@@ -49,7 +55,7 @@ void process_audio(int* samples, int n)
 	}
 }
 
-int open_stream(snd_pcm_t** handle, int dir, snd_pcm_uframes_t period)
+static int open_stream(snd_pcm_t** handle, const char* device_name, int dir, snd_pcm_uframes_t period)
 {
 	snd_pcm_hw_params_t *params;
 	unsigned int val;
@@ -57,9 +63,9 @@ int open_stream(snd_pcm_t** handle, int dir, snd_pcm_uframes_t period)
 	int rc;
 
 	/* Open PCM device for capture/playback */
-	if ((rc = snd_pcm_open(handle, "hw:0", dir, SND_PCM_NONBLOCK)) < 0) {
-	    fprintf(stderr, "unable to open pcm device: %s\n", snd_strerror(rc));
-	    return 0;
+	if ((rc = snd_pcm_open(handle, device_name, dir, SND_PCM_NONBLOCK)) < 0) {
+	    fprintf(stderr, "%s: unable to open pcm device: %s\n", __FUNCTION__, snd_strerror(rc));
+	    exit(EXIT_FAILURE);
 	}
 
 	/* Allocate a hardware parameters object. */
@@ -79,28 +85,22 @@ int open_stream(snd_pcm_t** handle, int dir, snd_pcm_uframes_t period)
 	/* Two channels (stereo) */
 	snd_pcm_hw_params_set_channels(*handle, params, 2);
 
-	/* 48000 bits/second sampling rate */
-	val = 48000;
+	/* Set sampling rate */
+	val = DEFAULT_SAMPLE_RATE;
 	snd_pcm_hw_params_set_rate_near(*handle, params, &val, &exactness);
-
-	#if 1
-		if ((rc = snd_pcm_hw_params_set_buffer_size(*handle, params, period*128)) < 0) {
-			fprintf(stderr, "cannot set buffer time (%s)", snd_strerror(rc));
-		}
-	#endif
 
 	snd_pcm_hw_params_set_period_size_near(*handle, params, &period, &exactness);
 
 	/* Write the parameters to the driver */
 	if ((rc = snd_pcm_hw_params(*handle, params)) < 0) {
-	    fprintf(stderr, "unable to set hw parameters: %s\n", snd_strerror(rc));
-	    exit(1);
+	    fprintf(stderr, "%s: unable to set hardware parameters: %s\n", __FUNCTION__, snd_strerror(rc));
+	    exit(EXIT_FAILURE);
 	}
 
 	return period;
 }
 
-static void* realtime_audio(void* p) // no printf when audio is working please
+static void* realtime_audio(void* p) // no printf in real-time thread please
 {
 	Audio_t* audio = (Audio_t*)p;
 	int rc;
@@ -127,6 +127,9 @@ static void* realtime_audio(void* p) // no printf when audio is working please
             }
 	    }
 	}
+
+	snd_pcm_drain(audio->handle_playback);
+	snd_pcm_drain(audio->handle_capture);
 
 	return p;
 }
@@ -163,42 +166,45 @@ const char* pthread_err(int err)
 	return str;
 }
 
-int start_audio_thread(Audio_t* audio)
+int start_audio(Audio_t* audio)
 {
 	pthread_attr_t attr;
 	int err;
 	int size;
 
+	audio->frames = open_stream(&audio->handle_capture, DEFAULT_CAPTURE_DEVICE, SND_PCM_STREAM_CAPTURE, DEFAULT_PERIOD_SIZE);
+	open_stream(&audio->handle_playback, DEFAULT_PLAYBACK_DEVICE, SND_PCM_STREAM_PLAYBACK, DEFAULT_PERIOD_SIZE);
+
 	size = audio->frames * 4; /* 2 bytes/sample, 2 channels */
 	if(NULL == (audio->buffer = (int*)malloc(size))) {
-		fprintf(stderr, "start_audio_thread: allocation error\n");
+		fprintf(stderr, "%s: start_audio_thread: allocation error\n", __FUNCTION__);
 		return 0;
 	}
 
 	if(0 != (err = pthread_attr_init(&attr))) {
-		printf("pthread_attr_init: error (%s)\n", pthread_err(err));
+		fprintf(stderr, "%s: pthread_attr_init: error (%s)\n", __FUNCTION__, pthread_err(err));
 		return 0;
 	}
 
-	if(0 != (err = pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED))) { // PTHREAD_CREATE_JOINABLE
-		printf("pthread_attr_setdetachstate: error (%s)\n", pthread_err(err));
+	if(0 != (err = pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED))) {
+		fprintf(stderr, "%s: pthread_attr_setdetachstate: error (%s)\n", __FUNCTION__, pthread_err(err));
 		return 0;
 	}
 
 	if(0 != (err = pthread_attr_setinheritsched(&attr, PTHREAD_EXPLICIT_SCHED))) {
-		printf("pthread_attr_setinheritsched: error (%s)\n", pthread_err(err));
+		fprintf(stderr, "%s: pthread_attr_setinheritsched: error (%s)\n", __FUNCTION__, pthread_err(err));
 		return 0;
 	}
 
-	if(0 != (err = pthread_create(&audio->realtime_audio_thread, &attr, realtime_audio, &Audio))) {
-		printf("pthread_create: error (%s)\n", pthread_err(err));
+	if(0 != (err = pthread_create(&audio->realtime_audio_thread, &attr, realtime_audio, audio))) {
+		fprintf(stderr, "%s: pthread_create: error (%s)\n", __FUNCTION__, pthread_err(err));
 		return 0;
 	}
 
 	struct sched_param param;
 	param.sched_priority = sched_get_priority_max(SCHED_FIFO) - 10;
 	if(0 != (err = pthread_setschedparam(audio->realtime_audio_thread, SCHED_FIFO, &param))) {
-		printf("pthread_setschedparam: error (%s)\n", pthread_err(err));
+		fprintf(stderr, "%s: pthread_setschedparam: error (%s)\n", __FUNCTION__, pthread_err(err));
 		return 0;
 	}
 
@@ -214,31 +220,43 @@ void stop_audio(Audio_t* audio)
 		sleep(0);
 	}
 
-	printf("finished real-time audio thread\n");
+	printf("Finished real-time audio thread\n");
 
-	snd_pcm_drain(audio->handle_playback);
-	snd_pcm_close(audio->handle_playback);
-	snd_pcm_drain(audio->handle_capture);
-	snd_pcm_close(audio->handle_capture);
+#if 0
+	printf("playback clean\n");
+	if(audio->handle_playback) {
+		snd_pcm_hw_free(audio->handle_playback);
+		snd_pcm_close(audio->handle_playback);
+		audio->handle_playback = NULL;
+	}
 
-	free(audio->buffer);
+	printf("capture clean\n");
+	if(audio->handle_capture) {
+		snd_pcm_hw_free(audio->handle_capture);
+		snd_pcm_close(audio->handle_capture);
+		audio->handle_capture = NULL;
+	}
+
+	if(audio->buffer) {
+		free(audio->buffer);
+		audio->buffer = NULL;
+	}
+#endif
 }
 
 static void safe_exit()
 {
+    printf("Stop Audio\n");
 	stop_audio(&Audio);
-
-	exit(1);
 }
 
 static void signal_handler(int s)
 {
     printf("\nCaught signal %d\n",s);
-
-    safe_exit();
+    main_thread_active = 0;
 }
 
-uint64_t get_microseconds()
+static uint64_t get_microseconds()
 {
 	uint64_t t;
 	struct timespec time;
@@ -250,8 +268,6 @@ uint64_t get_microseconds()
 
 int main()
 {
-	Audio_t* audio = &Audio;
-	snd_pcm_uframes_t frames;
 	uint64_t t0, t;
 	struct sigaction sigIntHandler;
 
@@ -262,19 +278,18 @@ int main()
 	sigaction(SIGINT, &sigIntHandler, NULL);
 	sigaction(SIGTERM, &sigIntHandler, NULL);
 
-	audio->frames = open_stream(&audio->handle_capture, SND_PCM_STREAM_CAPTURE, 32);
-	frames = open_stream(&audio->handle_playback, SND_PCM_STREAM_PLAYBACK, 32);
+	atexit(safe_exit);
 
-	if(audio->frames != frames) {
-	    fprintf(stderr, "in/out buffers are different %d != %d ", (int)audio->frames, (int)frames);
-	    exit(1);
+	if(!start_audio(&Audio)) {
+		fprintf(stderr, "%s: can't start audio\n", __FUNCTION__);
+	    exit(EXIT_FAILURE);
 	}
-
-	start_audio_thread(audio);
 
 	t0 = get_microseconds();
 
-	while (1)
+	main_thread_active = 1;
+
+	while(main_thread_active)
 	{
 		t = get_microseconds();
 		if(t - t0 > 1000000) {
@@ -284,6 +299,8 @@ int main()
 		}
 		sleep(0);
 	}
+
+	printf("Finished main audio thread\n");
 
 	return 0;
 }
