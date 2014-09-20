@@ -105,6 +105,15 @@ static void* realtime_audio(void* p) // no printf in real-time thread please
 	Audio_t* audio = (Audio_t*)p;
 	int rc;
 
+	memset(audio->buffer, 0, audio->frames*8);
+
+    snd_pcm_prepare(audio->handle_capture);
+	snd_pcm_prepare(audio->handle_playback);
+
+	do {
+		rc = snd_pcm_writei(audio->handle_playback, audio->buffer, audio->frames);
+	}	while(rc > 0);
+
 	audio->active = 1;
 
 	while(audio->active)
@@ -128,8 +137,8 @@ static void* realtime_audio(void* p) // no printf in real-time thread please
 	    }
 	}
 
-	snd_pcm_drain(audio->handle_playback);
-	snd_pcm_drain(audio->handle_capture);
+	snd_pcm_drop(audio->handle_playback);
+	snd_pcm_drop(audio->handle_capture);
 
 	return p;
 }
@@ -175,7 +184,7 @@ int start_audio(Audio_t* audio)
 	audio->frames = open_stream(&audio->handle_capture, DEFAULT_CAPTURE_DEVICE, SND_PCM_STREAM_CAPTURE, DEFAULT_PERIOD_SIZE);
 	open_stream(&audio->handle_playback, DEFAULT_PLAYBACK_DEVICE, SND_PCM_STREAM_PLAYBACK, DEFAULT_PERIOD_SIZE);
 
-	size = audio->frames * 4; /* 2 bytes/sample, 2 channels */
+	size = audio->frames * 8; /* 4 bytes/sample, 2 channels */
 	if(NULL == (audio->buffer = (int*)malloc(size))) {
 		fprintf(stderr, "%s: start_audio_thread: allocation error\n", __FUNCTION__);
 		return 0;
@@ -222,15 +231,12 @@ void stop_audio(Audio_t* audio)
 
 	printf("Finished real-time audio thread\n");
 
-#if 0
-	printf("playback clean\n");
 	if(audio->handle_playback) {
 		snd_pcm_hw_free(audio->handle_playback);
 		snd_pcm_close(audio->handle_playback);
 		audio->handle_playback = NULL;
 	}
 
-	printf("capture clean\n");
 	if(audio->handle_capture) {
 		snd_pcm_hw_free(audio->handle_capture);
 		snd_pcm_close(audio->handle_capture);
@@ -241,12 +247,11 @@ void stop_audio(Audio_t* audio)
 		free(audio->buffer);
 		audio->buffer = NULL;
 	}
-#endif
 }
 
 static void safe_exit()
 {
-    printf("Stop Audio\n");
+    printf("Safe exit\n");
 	stop_audio(&Audio);
 }
 
@@ -256,19 +261,8 @@ static void signal_handler(int s)
     main_thread_active = 0;
 }
 
-static uint64_t get_microseconds()
-{
-	uint64_t t;
-	struct timespec time;
-
-	clock_gettime(CLOCK_MONOTONIC, &time);
-	t = (uint64_t) time.tv_sec * 1000000 + (uint64_t) time.tv_nsec / 1000;
-	return t;
-}
-
 int main()
 {
-	uint64_t t0, t;
 	struct sigaction sigIntHandler;
 
 	sigIntHandler.sa_handler = signal_handler;
@@ -285,19 +279,13 @@ int main()
 	    exit(EXIT_FAILURE);
 	}
 
-	t0 = get_microseconds();
-
-	main_thread_active = 1;
+    main_thread_active = 1;
 
 	while(main_thread_active)
 	{
-		t = get_microseconds();
-		if(t - t0 > 1000000) {
-			t0 = t;
-			printf(".");
-			fflush(stdout);
-		}
-		sleep(0);
+		printf(".");
+		fflush(stdout);
+		sleep(1);
 	}
 
 	printf("Finished main audio thread\n");
