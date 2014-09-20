@@ -55,51 +55,6 @@ static void process_audio(int* samples, int n)
 	}
 }
 
-static int open_stream(snd_pcm_t** handle, const char* device_name, int dir, snd_pcm_uframes_t period)
-{
-	snd_pcm_hw_params_t *params;
-	unsigned int val;
-	int exactness;
-	int rc;
-
-	/* Open PCM device for capture/playback */
-	if ((rc = snd_pcm_open(handle, device_name, dir, SND_PCM_NONBLOCK)) < 0) {
-	    fprintf(stderr, "%s: unable to open pcm device: %s\n", __FUNCTION__, snd_strerror(rc));
-	    exit(EXIT_FAILURE);
-	}
-
-	/* Allocate a hardware parameters object. */
-	snd_pcm_hw_params_alloca(&params);
-
-	/* Fill it in with default values. */
-	snd_pcm_hw_params_any(*handle, params);
-
-	/* Set the desired hardware parameters. */
-
-	/* Interleaved mode */
-	snd_pcm_hw_params_set_access(*handle, params, SND_PCM_ACCESS_RW_INTERLEAVED);
-
-	/* Signed 16-bit little-endian format */
-	snd_pcm_hw_params_set_format(*handle, params, SND_PCM_FORMAT_S32_LE);
-
-	/* Two channels (stereo) */
-	snd_pcm_hw_params_set_channels(*handle, params, 2);
-
-	/* Set sampling rate */
-	val = DEFAULT_SAMPLE_RATE;
-	snd_pcm_hw_params_set_rate_near(*handle, params, &val, &exactness);
-
-	snd_pcm_hw_params_set_period_size_near(*handle, params, &period, &exactness);
-
-	/* Write the parameters to the driver */
-	if ((rc = snd_pcm_hw_params(*handle, params)) < 0) {
-	    fprintf(stderr, "%s: unable to set hardware parameters: %s\n", __FUNCTION__, snd_strerror(rc));
-	    exit(EXIT_FAILURE);
-	}
-
-	return period;
-}
-
 static void* realtime_audio(void* p) // no printf in real-time thread please
 {
 	Audio_t* audio = (Audio_t*)p;
@@ -173,6 +128,51 @@ const char* pthread_err(int err)
 	}
 
 	return str;
+}
+
+static int open_stream(snd_pcm_t** handle, const char* device_name, int dir, snd_pcm_uframes_t period)
+{
+	snd_pcm_hw_params_t *params;
+	unsigned int val;
+	int exactness;
+	int rc;
+
+	/* Open PCM device for capture/playback */
+	if ((rc = snd_pcm_open(handle, device_name, dir, SND_PCM_NONBLOCK)) < 0) {
+	    fprintf(stderr, "%s: unable to open pcm device: %s\n", __FUNCTION__, snd_strerror(rc));
+	    exit(EXIT_FAILURE);
+	}
+
+	/* Allocate a hardware parameters object. */
+	snd_pcm_hw_params_alloca(&params);
+
+	/* Fill it in with default values. */
+	snd_pcm_hw_params_any(*handle, params);
+
+	/* Set the desired hardware parameters. */
+
+	/* Interleaved mode */
+	snd_pcm_hw_params_set_access(*handle, params, SND_PCM_ACCESS_RW_INTERLEAVED);
+
+	/* Signed 16-bit little-endian format */
+	snd_pcm_hw_params_set_format(*handle, params, SND_PCM_FORMAT_S32_LE);
+
+	/* Two channels (stereo) */
+	snd_pcm_hw_params_set_channels(*handle, params, 2);
+
+	/* Set sampling rate */
+	val = DEFAULT_SAMPLE_RATE;
+	snd_pcm_hw_params_set_rate_near(*handle, params, &val, &exactness);
+
+	snd_pcm_hw_params_set_period_size_near(*handle, params, &period, &exactness);
+
+	/* Write the parameters to the driver */
+	if ((rc = snd_pcm_hw_params(*handle, params)) < 0) {
+	    fprintf(stderr, "%s: unable to set hardware parameters: %s\n", __FUNCTION__, snd_strerror(rc));
+	    exit(EXIT_FAILURE);
+	}
+
+	return period;
 }
 
 int start_audio(Audio_t* audio)
