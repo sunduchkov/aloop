@@ -16,15 +16,22 @@
 /* Use the newer ALSA API */
 #define ALSA_PCM_NEW_HW_PARAMS_API
 
+#include <getopt.h>
 #include <pthread.h>
 #include <signal.h>
 #include <inttypes.h>
 #include <alsa/asoundlib.h>
 
 #define DEFAULT_SAMPLE_RATE		48000
-#define DEFAULT_PERIOD_SIZE		32				// frames (stereo samples) number between PCM interrupts
-#define DEFAULT_PLAYBACK_DEVICE	"hw:0,0"
-#define DEFAULT_CAPTURE_DEVICE	"hw:0,0"
+
+// frames (stereo samples) number between PCM interrupts
+#define DEFAULT_PERIOD_SIZE		32
+
+#define DEFAULT_BUFFER_SIZE		(128*DEFAULT_PERIOD_SIZE)
+
+// hw: Direct hardware device without any conversions
+// plughw: Hardware device with all software conversions
+#define DEFAULT_DEVICE	"hw:0,0"
 
 typedef struct
 {
@@ -34,6 +41,12 @@ typedef struct
 	snd_pcm_t *handle_playback;
 	snd_pcm_t *handle_capture;
 	pthread_t realtime_audio_thread;
+
+	// parameters
+	int sample_rate;
+	char* device_name;
+	int period_size;
+	int buffer_size;
 
 }	Audio_t;
 
@@ -73,6 +86,12 @@ static void* realtime_audio(void* p) // no printf in real-time thread please
 
 	while(audio->active)
 	{
+		if(0 == snd_pcm_wait(audio->handle_playback, 48)) {
+			printf("%s: timeout\n", __FUNCTION__);
+	        snd_pcm_prepare(audio->handle_capture);
+        	snd_pcm_prepare(audio->handle_playback);
+        	continue;
+		}
 	    rc = snd_pcm_readi(audio->handle_capture, audio->buffer, audio->frames);
 	    if (rc == -EPIPE)
 	    {
@@ -100,7 +119,7 @@ static void* realtime_audio(void* p) // no printf in real-time thread please
 	return p;
 }
 
-static int open_stream(snd_pcm_t** handle, const char* device_name, int dir, snd_pcm_uframes_t period)
+static int open_stream(snd_pcm_t** handle, const char* device_name, int dir, unsigned int sample_rate, snd_pcm_uframes_t period, snd_pcm_uframes_t buffer_size)
 {
 	snd_pcm_hw_params_t *params;
 	unsigned int val;
@@ -131,10 +150,15 @@ static int open_stream(snd_pcm_t** handle, const char* device_name, int dir, snd
 	snd_pcm_hw_params_set_channels(*handle, params, 2);
 
 	/* Set sampling rate */
-	val = DEFAULT_SAMPLE_RATE;
+	val = sample_rate;
 	snd_pcm_hw_params_set_rate_near(*handle, params, &val, &exactness);
 
 	snd_pcm_hw_params_set_period_size_near(*handle, params, &period, &exactness);
+
+	if ((rc = snd_pcm_hw_params_set_buffer_size(*handle, params, buffer_size)) < 0) {
+		fprintf(stderr, "%s: cannot set buffer size",__FUNCTION__);
+	    exit(EXIT_FAILURE);
+	}
 
 	/* Write the parameters to the driver */
 	if ((rc = snd_pcm_hw_params(*handle, params)) < 0) {
@@ -151,8 +175,8 @@ int start_audio(Audio_t* audio)
 	int err;
 	int size;
 
-	audio->frames = open_stream(&audio->handle_capture, DEFAULT_CAPTURE_DEVICE, SND_PCM_STREAM_CAPTURE, DEFAULT_PERIOD_SIZE);
-	open_stream(&audio->handle_playback, DEFAULT_PLAYBACK_DEVICE, SND_PCM_STREAM_PLAYBACK, DEFAULT_PERIOD_SIZE);
+	audio->frames = open_stream(&audio->handle_capture, audio->device_name, SND_PCM_STREAM_CAPTURE, audio->sample_rate, audio->period_size, audio->buffer_size);
+	open_stream(&audio->handle_playback, audio->device_name, SND_PCM_STREAM_PLAYBACK, audio->sample_rate, audio->period_size, audio->buffer_size);
 
 	size = audio->frames * 8; /* 4 bytes/sample, 2 channels */
 	if(NULL == (audio->buffer = (int*)malloc(size))) {
@@ -219,6 +243,73 @@ void stop_audio(Audio_t* audio)
 	}
 }
 
+static int get_options(Audio_t* audio, int argc, char *argv[])
+{
+	//alsa_driver_t* driver;
+
+	int needhelp = 0;
+	const struct option long_option[] =
+	{
+		{"help", no_argument, NULL, 'h'},
+		{"device", required_argument, NULL, 'd'},
+		{"rate", required_argument, NULL, 'r'},
+		{"period", required_argument, NULL, 'p'},
+		{"buffer", required_argument, NULL, 'b'},
+		{NULL, 0, NULL, 0},
+	};
+
+	int c;
+	int err;
+
+	if(!audio) {
+		printf("main_get_options with NULL pointer");
+		return 0;
+	}
+
+	audio->sample_rate = DEFAULT_SAMPLE_RATE;
+	audio->period_size = DEFAULT_PERIOD_SIZE;
+	audio->buffer_size = DEFAULT_BUFFER_SIZE;
+	audio->device_name = strdup(DEFAULT_DEVICE);
+
+	while ((c = getopt_long(argc, argv, "hd:r:p:b:", long_option, NULL)) != -1) {
+		switch (c) {
+		case 'h':
+			needhelp = 1;
+			break;
+		case 'd':
+			audio->device_name = strdup(optarg);
+			break;
+		case 'r':
+			err = atoi(optarg);
+			audio->sample_rate = err >= 8000 && err <= 48000 ? err : DEFAULT_SAMPLE_RATE;
+			break;
+		case 'p':
+			err = atoi(optarg);
+			audio->period_size = err >= 32 && err < 200000 ? err : 0;
+			break;
+		case 'b':
+			err = atoi(optarg);
+			audio->buffer_size = err >= 32 && err < 200000 ? err : 0;
+			break;
+		}
+	}
+
+	if (needhelp) {
+		printf(
+				"Usage: aloop [OPTIONS]\n"
+				"-h,--help      this message\n"
+				"-d,--device    playback/capture device (hw:0,0 by default - good for internal devices, try hw:1,0 for others)\n"
+				"-r,--rate      sample rate in [Hz]\n"
+				"-p,--period    period size in frames\n"
+				"-b,--buffer    buffer size in frames (try 2 x period size first)\n"
+		);
+		return 0;
+	}
+
+	return 1;
+}
+
+
 static void safe_exit()
 {
     printf("Safe exit\n");
@@ -231,7 +322,7 @@ static void signal_handler(int s)
     main_thread_active = 0;
 }
 
-int main()
+int main(int argc, char* argv[])
 {
 	struct sigaction sigIntHandler;
 
@@ -243,6 +334,14 @@ int main()
 	sigaction(SIGTERM, &sigIntHandler, NULL);
 
 	atexit(safe_exit);
+
+	if(!get_options(&Audio, argc, argv)) {
+		fprintf(stderr, "%s: can't get options\n", __FUNCTION__);
+	    exit(EXIT_FAILURE);
+	}
+
+	printf("Start audio device %s with %d sample rate, %d period size, %d buffer size\n",
+			Audio.device_name, Audio.sample_rate, Audio.period_size, Audio.buffer_size);
 
 	if(!start_audio(&Audio)) {
 		fprintf(stderr, "%s: can't start audio\n", __FUNCTION__);
