@@ -86,12 +86,6 @@ static void* realtime_audio(void* p) // no printf in real-time thread please
 
 	while(audio->active)
 	{
-		if(0 == snd_pcm_wait(audio->handle_playback, 48)) {
-			printf("%s: timeout\n", __FUNCTION__);
-	        snd_pcm_prepare(audio->handle_capture);
-        	snd_pcm_prepare(audio->handle_playback);
-        	continue;
-		}
 	    rc = snd_pcm_readi(audio->handle_capture, audio->buffer, audio->frames);
 	    if (rc == -EPIPE)
 	    {
