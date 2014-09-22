@@ -10,9 +10,9 @@ After Ubuntu setup please check which audio hardware is available on your system
 
 To check ALSA audio system you can use the following command line tools
 
->aplay
->arecord
->speaker-test
+>aplay <br>
+>arecord <br>
+>speaker-test <br>
 
 Before run audio program usually [ALSA Mixer Setup](https://github.com/sunduchkov/aloop/wiki/ALSA-Mixer) is required.
 
