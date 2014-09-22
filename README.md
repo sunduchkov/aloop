@@ -1,4 +1,4 @@
-Audio path-through program designed to use on embedded ARM computers like Beagleboard xM, Beaglebone Black, Pandaboard ES operating on Ubuntu Linux. The program uses ALSA interface to communicate with a hardware.
+Audio path-through program designed to use on embedded ARM [computers](https://github.com/sunduchkov/aloop/wiki/Audio-Boards) like Beagleboard xM, Beaglebone Black, Pandaboard ES operating on Ubuntu Linux. The program uses ALSA interface to communicate with a hardware.
 
 The program can be built in a cross-build environment (e.g. on Oracle Virtualbox running Ubuntu). Please look to the Wiki [How to setup the build environment](https://github.com/sunduchkov/aloop/wiki/Host-Setup-for-Cross-build).
 
@@ -11,10 +11,6 @@ After Ubuntu setup please check which audio hardware is available on your system
 Before run audio program usually [ALSA Mixer Setup](https://github.com/sunduchkov/aloop/wiki/ALSA-Mixer) is required.
 
 >alsamixer # this is standard tool from alsa-util package
-
-If your board does not have own audio and you connect audio through USB you probably need to run mixer with a card number parameter.
-
->alsamixer -c 1
 
 It is recommended to add user to audio group otherwise root privileges (or sudo command) will be required.
 
