@@ -6,9 +6,10 @@ If you just received the ARM computer you will be interested how to bring it lif
 
 After Ubuntu setup please check which audio hardware is available on your system. The easiest way to do this is:
 
->aplay -l # this is standard tool from alsa-util package
+>aplay -l <br>
+>aplay -L
 
-To check ALSA audio system you can use the following command line tools
+To check ALSA audio system you can use the following command line tools from alsa-utils package.
 
 >aplay <br>
 >arecord <br>
@@ -16,7 +17,7 @@ To check ALSA audio system you can use the following command line tools
 
 Before run audio program usually [ALSA Mixer Setup](https://github.com/sunduchkov/aloop/wiki/ALSA-Mixer) is required.
 
->alsamixer # this is standard tool from alsa-util package
+>alsamixer
 
 It is recommended to add user to audio group otherwise root privileges (or sudo command) will be required.
 
