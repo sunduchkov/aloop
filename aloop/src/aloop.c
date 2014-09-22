@@ -23,8 +23,8 @@
 
 #define DEFAULT_SAMPLE_RATE		48000
 #define DEFAULT_PERIOD_SIZE		32				// frames (stereo samples) number between PCM interrupts
-#define DEFAULT_PLAYBACK_DEVICE	"plughw:0,0"
-#define DEFAULT_CAPTURE_DEVICE	"plughw:0,0"
+#define DEFAULT_PLAYBACK_DEVICE	"hw:0,0"
+#define DEFAULT_CAPTURE_DEVICE	"hw:0,0"
 
 typedef struct
 {
@@ -60,7 +60,7 @@ static void* realtime_audio(void* p) // no printf in real-time thread please
 	Audio_t* audio = (Audio_t*)p;
 	int rc;
 
-	memset(audio->buffer, 0, audio->frames*8);
+	memset(audio->buffer, 0, audio->frames*8); /* 8 because of 4 bytes/sample, 2 channels */
 
     snd_pcm_prepare(audio->handle_capture);
 	snd_pcm_prepare(audio->handle_playback);
@@ -90,44 +90,14 @@ static void* realtime_audio(void* p) // no printf in real-time thread please
             	snd_pcm_prepare(audio->handle_playback);
             }
 	    }
+
+	    usleep(0);
 	}
 
 	snd_pcm_drop(audio->handle_playback);
 	snd_pcm_drop(audio->handle_capture);
 
 	return p;
-}
-
-const char* pthread_err(int err)
-{
-	static const char sEAGAIN[] = "Insufficient  resources  to  create another thread";
-	static const char sEINVAL[] = "Invalid settings";
-	static const char sEPERM[] = "No permission to set the scheduling policy and parameters";
-	static const char sESRCH[] = "No thread with the ID thread could be found";
-	static const char sENOTSUP[] = "Unsupported value";
-	static const char sUNKNOWN[] = "Unrecognized error";
-	const char* str = NULL;
-
-	if(EAGAIN == err) {
-		str = sEAGAIN;
-	}
-	else if(EINVAL == err) {
-		str = sEINVAL;
-	}
-	else if(EPERM == err) {
-		str = sEPERM;
-	}
-	else if(ESRCH == err) {
-		str = sESRCH;
-	}
-	else if(ENOTSUP == err) {
-		str = sENOTSUP;
-	}
-	else {
-		str = sUNKNOWN;
-	}
-
-	return str;
 }
 
 static int open_stream(snd_pcm_t** handle, const char* device_name, int dir, snd_pcm_uframes_t period)
@@ -154,7 +124,7 @@ static int open_stream(snd_pcm_t** handle, const char* device_name, int dir, snd
 	/* Interleaved mode */
 	snd_pcm_hw_params_set_access(*handle, params, SND_PCM_ACCESS_RW_INTERLEAVED);
 
-	/* Signed 16-bit little-endian format */
+	/* Signed 32-bit little-endian format */
 	snd_pcm_hw_params_set_format(*handle, params, SND_PCM_FORMAT_S32_LE);
 
 	/* Two channels (stereo) */
@@ -191,29 +161,29 @@ int start_audio(Audio_t* audio)
 	}
 
 	if(0 != (err = pthread_attr_init(&attr))) {
-		fprintf(stderr, "%s: pthread_attr_init: error (%s)\n", __FUNCTION__, pthread_err(err));
+		fprintf(stderr, "%s: pthread_attr_init: error %d\n", __FUNCTION__, err);
 		return 0;
 	}
 
 	if(0 != (err = pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED))) {
-		fprintf(stderr, "%s: pthread_attr_setdetachstate: error (%s)\n", __FUNCTION__, pthread_err(err));
+		fprintf(stderr, "%s: pthread_attr_setdetachstate: error %d\n", __FUNCTION__, err);
 		return 0;
 	}
 
 	if(0 != (err = pthread_attr_setinheritsched(&attr, PTHREAD_EXPLICIT_SCHED))) {
-		fprintf(stderr, "%s: pthread_attr_setinheritsched: error (%s)\n", __FUNCTION__, pthread_err(err));
+		fprintf(stderr, "%s: pthread_attr_setinheritsched: error %d\n", __FUNCTION__, err);
 		return 0;
 	}
 
 	if(0 != (err = pthread_create(&audio->realtime_audio_thread, &attr, realtime_audio, audio))) {
-		fprintf(stderr, "%s: pthread_create: error (%s)\n", __FUNCTION__, pthread_err(err));
+		fprintf(stderr, "%s: pthread_create: error %d\n", __FUNCTION__, err);
 		return 0;
 	}
 
 	struct sched_param param;
 	param.sched_priority = sched_get_priority_max(SCHED_FIFO) - 10;
 	if(0 != (err = pthread_setschedparam(audio->realtime_audio_thread, SCHED_FIFO, &param))) {
-		fprintf(stderr, "%s: pthread_setschedparam: error (%s)\n", __FUNCTION__, pthread_err(err));
+		fprintf(stderr, "%s: pthread_setschedparam: error %d\n", __FUNCTION__, err);
 		return 0;
 	}
 
