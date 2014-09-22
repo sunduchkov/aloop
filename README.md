@@ -9,7 +9,7 @@ After Ubuntu setup please check which audio hardware is available on your system
 >aplay -l <br>
 >aplay -L
 
-To check ALSA audio system you can use the following command line tools from alsa-utils package.
+It is recommended to add user to audio group otherwise root privileges (or sudo command) will be required. To check ALSA audio system you can use the following command line tools from alsa-utils package.
 
 >aplay <br>
 >arecord <br>
@@ -19,6 +19,4 @@ Before run audio program usually [ALSA Mixer Setup](https://github.com/sunduchko
 
 >alsamixer
 
-It is recommended to add user to audio group otherwise root privileges (or sudo command) will be required.
-
-Start program without parameters will run audio system with default parameters. If something goes wrong please run program with -h option to see what can be changed.
+Start program without parameters will run audio system with default parameters. The program capture signal from input device and play it on playback device. If something goes wrong please run program with -h option to see what can be changed.
