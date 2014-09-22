@@ -8,6 +8,13 @@ After Ubuntu setup please check which audio hardware is available on your system
 
 >aplay -l # this is standard tool from alsa-util package
 
+To check ALSA audio system you can use the following command line tools
+```
+aplay
+arecord
+speaker-test
+```
+
 Before run audio program usually [ALSA Mixer Setup](https://github.com/sunduchkov/aloop/wiki/ALSA-Mixer) is required.
 
 >alsamixer # this is standard tool from alsa-util package
