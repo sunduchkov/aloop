@@ -36,14 +36,14 @@
 typedef struct
 {
 	int* buffer;
-	int  frames;
 	int  active;
+	int  corrupted;
 	snd_pcm_t *handle_playback;
 	snd_pcm_t *handle_capture;
 	pthread_t realtime_audio_thread;
 
 	// parameters
-	int sample_rate;
+	unsigned int sample_rate;
 	char* device_name;
 	int period_size;
 	int buffer_size;
@@ -71,25 +71,26 @@ static void process_audio(int* samples, int n)
 static void* realtime_audio(void* p) // no printf in real-time thread please
 {
 	Audio_t* audio = (Audio_t*)p;
+	snd_pcm_sframes_t avail;
 	int rc;
-
-	memset(audio->buffer, 0, audio->frames*8); /* 8 because of 4 bytes/sample, 2 channels */
 
     snd_pcm_prepare(audio->handle_capture);
 	snd_pcm_prepare(audio->handle_playback);
 
-	do {
-		rc = snd_pcm_writei(audio->handle_playback, audio->buffer, audio->frames);
-	}	while(rc > 0);
+	avail = snd_pcm_avail_update (audio->handle_playback);
+
+	snd_pcm_writei(audio->handle_playback, audio->buffer, avail);
 
 	audio->active = 1;
+	audio->corrupted = 0;
 
 	while(audio->active)
 	{
-	    rc = snd_pcm_readi(audio->handle_capture, audio->buffer, audio->frames);
+	    rc = snd_pcm_readi(audio->handle_capture, audio->buffer, audio->period_size);
 	    if (rc == -EPIPE)
 	    {
 	        /* EPIPE means overrun */
+	    	audio->corrupted = 1;
 	        snd_pcm_prepare(audio->handle_capture);
 	    }
 	    else if(rc > 0)
@@ -100,6 +101,7 @@ static void* realtime_audio(void* p) // no printf in real-time thread please
             if (rc == -EPIPE)
             {
 	            /* EPIPE means underrun */
+    	    	audio->corrupted = 1;
             	snd_pcm_prepare(audio->handle_playback);
             }
 	    }
@@ -113,16 +115,15 @@ static void* realtime_audio(void* p) // no printf in real-time thread please
 	return p;
 }
 
-static int open_stream(snd_pcm_t** handle, const char* device_name, int dir, unsigned int sample_rate, snd_pcm_uframes_t period, snd_pcm_uframes_t buffer_size)
+static int open_stream(snd_pcm_t** handle, const char* device_name, int dir, unsigned int* sample_rate, snd_pcm_uframes_t period, snd_pcm_uframes_t buffer_size)
 {
 	snd_pcm_hw_params_t *params;
-	unsigned int val;
 	int exactness;
-	int rc;
+	int err;
 
 	/* Open PCM device for capture/playback */
-	if ((rc = snd_pcm_open(handle, device_name, dir, SND_PCM_NONBLOCK)) < 0) {
-	    fprintf(stderr, "%s: unable to open pcm device: %s\n", __FUNCTION__, snd_strerror(rc));
+	if ((err = snd_pcm_open(handle, device_name, dir, SND_PCM_NONBLOCK)) < 0) {
+	    fprintf(stderr, "%s: unable to open pcm device: %s\n", __FUNCTION__, snd_strerror(err));
 	    exit(EXIT_FAILURE);
 	}
 
@@ -143,40 +144,46 @@ static int open_stream(snd_pcm_t** handle, const char* device_name, int dir, uns
 	/* Two channels (stereo) */
 	snd_pcm_hw_params_set_channels(*handle, params, 2);
 
-	/* Set sampling rate */
-	val = sample_rate;
-	snd_pcm_hw_params_set_rate_near(*handle, params, &val, &exactness);
-
-	snd_pcm_hw_params_set_period_size_near(*handle, params, &period, &exactness);
-
-	if ((rc = snd_pcm_hw_params_set_buffer_size(*handle, params, buffer_size)) < 0) {
-		fprintf(stderr, "%s: cannot set buffer size",__FUNCTION__);
+	if ((err = snd_pcm_hw_params_set_period_size(*handle, params, period, 0)) < 0) {
+		fprintf(stderr, "%s: cannot set period size (%s)\n", __FUNCTION__, snd_strerror(err));
 	    exit(EXIT_FAILURE);
 	}
+
+	if ((err = snd_pcm_hw_params_set_buffer_size(*handle, params, buffer_size)) < 0) {
+		fprintf(stderr, "%s: cannot set buffer size (%s)\n", __FUNCTION__, snd_strerror(err));
+	    exit(EXIT_FAILURE);
+	}
+
+	/* Set sampling rate */
+	if ((err = snd_pcm_hw_params_set_rate_near(*handle, params, sample_rate, &exactness)) < 0) {
+		fprintf(stderr, "%s: cannot set sample rate (%s)", __FUNCTION__, snd_strerror(err));
+	    exit(EXIT_FAILURE);
+	}
+	printf("%s: sample rate %d\n", __FUNCTION__, *sample_rate);
 
 	/* Write the parameters to the driver */
-	if ((rc = snd_pcm_hw_params(*handle, params)) < 0) {
-	    fprintf(stderr, "%s: unable to set hardware parameters: %s\n", __FUNCTION__, snd_strerror(rc));
+	if ((err = snd_pcm_hw_params(*handle, params)) < 0) {
+	    fprintf(stderr, "%s: unable to set hardware parameters: %s\n", __FUNCTION__, snd_strerror(err));
 	    exit(EXIT_FAILURE);
 	}
 
-	return period;
+	return 1;
 }
 
 int start_audio(Audio_t* audio)
 {
 	pthread_attr_t attr;
 	int err;
-	int size;
 
-	audio->frames = open_stream(&audio->handle_capture, audio->device_name, SND_PCM_STREAM_CAPTURE, audio->sample_rate, audio->period_size, audio->buffer_size);
-	open_stream(&audio->handle_playback, audio->device_name, SND_PCM_STREAM_PLAYBACK, audio->sample_rate, audio->period_size, audio->buffer_size);
+	open_stream(&audio->handle_capture, audio->device_name, SND_PCM_STREAM_CAPTURE, &audio->sample_rate, audio->period_size, audio->buffer_size);
+	open_stream(&audio->handle_playback, audio->device_name, SND_PCM_STREAM_PLAYBACK, &audio->sample_rate, audio->period_size, audio->buffer_size);
 
-	size = audio->frames * 8; /* 4 bytes/sample, 2 channels */
-	if(NULL == (audio->buffer = (int*)malloc(size))) {
+	/* 4 bytes/sample, 2 channels */
+	if(NULL == (audio->buffer = (int*)malloc(audio->period_size * 8))) {
 		fprintf(stderr, "%s: start_audio_thread: allocation error\n", __FUNCTION__);
 		return 0;
 	}
+	memset(audio->buffer, 0, audio->period_size * 8);
 
 	if(0 != (err = pthread_attr_init(&attr))) {
 		fprintf(stderr, "%s: pthread_attr_init: error %d\n", __FUNCTION__, err);
@@ -275,15 +282,15 @@ static int get_options(Audio_t* audio, int argc, char *argv[])
 			break;
 		case 'r':
 			err = atoi(optarg);
-			audio->sample_rate = err >= 8000 && err <= 48000 ? err : DEFAULT_SAMPLE_RATE;
+			audio->sample_rate = err;
 			break;
 		case 'p':
 			err = atoi(optarg);
-			audio->period_size = err >= 32 && err < 200000 ? err : 0;
+			audio->period_size = err;
 			break;
 		case 'b':
 			err = atoi(optarg);
-			audio->buffer_size = err >= 32 && err < 200000 ? err : 0;
+			audio->buffer_size = err;
 			break;
 		}
 	}
