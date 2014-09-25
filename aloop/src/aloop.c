@@ -353,6 +353,11 @@ int main(int argc, char* argv[])
 
 	while(main_thread_active)
 	{
+		if(Audio.corrupted) {
+			Audio.corrupted = 0;
+			printf("!");
+		}
+
 		printf(".");
 		fflush(stdout);
 		sleep(1);
