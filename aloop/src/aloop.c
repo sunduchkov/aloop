@@ -31,7 +31,9 @@
 
 // hw: Direct hardware device without any conversions
 // plughw: Hardware device with all software conversions
-#define DEFAULT_DEVICE	"hw:0,0"
+// some boards are not supporting a lot of sample rates by hardware
+// in this case software conversion can help
+#define DEFAULT_DEVICE	"plughw:0,0"
 
 typedef struct
 {
